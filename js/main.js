@@ -1,10 +1,11 @@
 import { Renderer } from './renderer.js';
 import { UI } from './ui.js';
-import { PRESETS, cloneEntity, serialize, deserialize } from './scene.js';
+import { PRESETS, ADDABLE, makeDefault, cloneEntity, serialize, deserialize } from './scene.js';
+import { TransformTool } from './transform.js';
 import { cameraBasis, screenRay } from './camera.js';
 import { pick } from './picking.js';
 import { drawOverlay } from './overlay.js';
-import { add, sub, scale, dot, normalize, clamp } from './math.js';
+import { add, sub, scale, dot, clamp } from './math.js';
 
 const STORAGE_KEY = 'lumen-scene-v1';
 
@@ -48,10 +49,12 @@ const app = {
   },
 
   select(id) {
+    if (this.tool?.active && this.tool.state.entity.id !== id) this.tool.confirm();
     this.selectedId = id;
     this.overlayDirty = true;
     ui.renderList();
     ui.renderInspector();
+    updateHint();
   },
 
   markDirty() {
@@ -78,11 +81,11 @@ const app = {
     this.select(null);
   },
 
-  duplicateSelected() {
+  duplicateSelected({ offset = true } = {}) {
     const e = this.selected;
     if (!e) return;
     const copy = cloneEntity(e);
-    copy.position = add(copy.position, [0.6, 0, 0.6]);
+    if (offset) copy.position = add(copy.position, [0.6, 0, 0.6]);
     this.addEntity(copy);
   },
 
@@ -101,6 +104,7 @@ const app = {
   },
 
   setScene(scene) {
+    if (this.tool?.active) this.tool.cancel();
     this.scene = scene;
     this.selectedId = null;
     this.markDirty();
@@ -176,8 +180,11 @@ function scheduleSave() {
 }
 
 // ---------------------------------------------------------------- interaction
+// Clicking selects; dragging the view orbits/pans. Objects are moved, rotated
+// and scaled with the G / R / S keyboard transforms (see transform.js).
 const pointers = new Map();
-let drag = null; // { mode: 'orbit'|'pan'|'move'|'lift'|'pinch', ... }
+let drag = null; // { mode: 'orbit'|'pan'|'pinch', ... }
+let mouse = [0, 0]; // last cursor position relative to the canvas
 
 function localXY(ev) {
   const r = glCanvas.getBoundingClientRect();
@@ -189,17 +196,125 @@ function rayAt(x, y) {
   return screenRay(b, x, y, glCanvas.clientWidth, glCanvas.clientHeight);
 }
 
-function intersectPlane(ro, rd, p0, n) {
-  const denom = dot(rd, n);
-  if (Math.abs(denom) < 1e-6) return null;
-  const t = dot(sub(p0, ro), n) / denom;
-  if (t <= 0 || t > 500) return null;
-  return add(ro, scale(rd, t));
+const tool = new TransformTool({
+  basis: () => cameraBasis(app.scene.camera),
+  size: () => [glCanvas.clientWidth, glCanvas.clientHeight],
+  rayAt,
+  onChange: () => {
+    app.markDirty();
+    ui.syncPosition();
+    updateHint();
+  },
+  onEnd: () => {
+    app.overlayDirty = true;
+    ui.renderInspector();
+    updateHint();
+  },
+});
+app.tool = tool;
+
+// ---------------------------------------------------------------- hint bar
+const hint = document.getElementById('hint');
+const k = (key) => `<kbd>${key}</kbd>`;
+function updateHint() {
+  if (tool.active) {
+    hint.classList.add('transforming');
+    hint.innerHTML =
+      `${tool.state.status}<br><span class="keys">${k('X')} ${k('Y')} ${k('Z')} axis · ` +
+      `${k('Shift')}+axis: lock axis · type a number · ${k('Ctrl')} snap · ` +
+      `click/${k('Enter')} confirm · right-click/${k('Esc')} cancel</span>`;
+    return;
+  }
+  hint.classList.remove('transforming');
+  hint.innerHTML = app.selected
+    ? `${k('G')} move · ${k('R')} rotate · ${k('S')} scale · ${k('Shift')}+${k('D')} duplicate · ${k('Del')} delete · ${k('Shift')}+${k('A')} add`
+    : `Click: select · ${k('Shift')}+${k('A')} add · Drag: orbit · Right-drag: pan · Wheel: zoom`;
 }
+
+// ---------------------------------------------------------------- add menu
+const addMenu = document.getElementById('add-menu');
+let menuIndex = 0;
+let menuPoint = [0, 0, 0];
+
+for (const item of ADDABLE) {
+  const btn = document.createElement('button');
+  btn.setAttribute('role', 'menuitem');
+  btn.innerHTML = `${item.label}<span class="key">${item.key}</span>`;
+  btn.addEventListener('click', () => addFromMenu(item.kind));
+  btn.addEventListener('pointerenter', () => setMenuIndex(ADDABLE.indexOf(item)));
+  addMenu.append(btn);
+}
+
+function setMenuIndex(i) {
+  menuIndex = (i + ADDABLE.length) % ADDABLE.length;
+  addMenu.querySelectorAll('button').forEach((b, j) => b.classList.toggle('active', j === menuIndex));
+}
+
+// Opens the menu at the cursor. New objects land on the surface under it.
+function openAddMenu() {
+  const [x, y] = mouse;
+  const { ro, rd } = rayAt(x, y);
+  const hit = pick(app.scene.entities.filter((e) => e.kind === 'object'), ro, rd);
+  if (hit) {
+    menuPoint = add(ro, scale(rd, hit.t));
+  } else if (rd[1] < -1e-3) {
+    menuPoint = add(ro, scale(rd, -ro[1] / rd[1])); // ground plane y = 0
+  } else {
+    menuPoint = [app.scene.camera.target[0], 0, app.scene.camera.target[2]];
+  }
+  addMenu.hidden = false;
+  const vw = viewport.clientWidth, vh = viewport.clientHeight;
+  addMenu.style.left = `${clamp(x, 8, Math.max(8, vw - addMenu.offsetWidth - 8))}px`;
+  addMenu.style.top = `${clamp(y, 8, Math.max(8, vh - addMenu.offsetHeight - 8))}px`;
+  setMenuIndex(0);
+}
+
+function closeAddMenu() {
+  addMenu.hidden = true;
+}
+
+function addFromMenu(kind) {
+  closeAddMenu();
+  app.addEntity(makeDefault(kind, menuPoint));
+}
+
+function handleMenuKey(ev) {
+  const key = ev.key.toLowerCase();
+  ev.preventDefault();
+  if (ev.key === 'Escape') closeAddMenu();
+  else if (ev.key === 'ArrowDown') setMenuIndex(menuIndex + 1);
+  else if (ev.key === 'ArrowUp') setMenuIndex(menuIndex - 1);
+  else if (ev.key === 'Enter') addFromMenu(ADDABLE[menuIndex].kind);
+  else {
+    const item = ADDABLE.find((i) => i.key.toLowerCase() === key);
+    if (item) addFromMenu(item.kind);
+  }
+}
+
+window.addEventListener('pointerdown', (ev) => {
+  if (!addMenu.hidden && !addMenu.contains(ev.target)) closeAddMenu();
+}, true);
+
+// ---------------------------------------------------------------- pointer
+window.addEventListener('pointermove', (ev) => {
+  mouse = localXY(ev);
+  if (tool.active) tool.setMouse(mouse, ev.ctrlKey || ev.metaKey);
+});
 
 glCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+// Any click while transforming finishes it: left confirms, right cancels.
+window.addEventListener('pointerdown', (ev) => {
+  if (!tool.active) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (ev.button === 2) tool.cancel();
+  else tool.confirm();
+}, true);
+
 glCanvas.addEventListener('pointerdown', (ev) => {
+  // Let keyboard shortcuts reach the app instead of a focused panel field.
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
   glCanvas.setPointerCapture(ev.pointerId);
   pointers.set(ev.pointerId, localXY(ev));
 
@@ -210,34 +325,8 @@ glCanvas.addEventListener('pointerdown', (ev) => {
   }
 
   const [x, y] = localXY(ev);
-  const start = { x, y, moved: false };
-
-  if (ev.button === 2 || ev.button === 1 || (ev.button === 0 && (ev.ctrlKey || ev.metaKey))) {
-    drag = { ...start, mode: 'pan' };
-    return;
-  }
-
-  const { ro, rd } = rayAt(x, y);
-  const hit = pick(app.scene.entities, ro, rd);
-  // Huge objects (ground planes, walls) are selectable from the list but
-  // dragging them by accident is annoying, so empty-ish hits on them orbit.
-  const big = hit && hit.entity.kind === 'object' && hit.entity.shape === 'box' && Math.max(...hit.entity.size) > 4.5;
-
-  if (hit && !big) {
-    const e = hit.entity;
-    if (app.selectedId !== e.id) app.select(e.id);
-    const hitPoint = add(ro, scale(rd, hit.t));
-    if (ev.shiftKey) {
-      // Lift: vertical plane facing the camera.
-      const b = cameraBasis(app.scene.camera);
-      const n = normalize([b.fwd[0], 0, b.fwd[2]]);
-      drag = { ...start, mode: 'lift', entity: e, plane: hitPoint, normal: n, offsetY: e.position[1] - hitPoint[1] };
-    } else {
-      drag = { ...start, mode: 'move', entity: e, plane: hitPoint, normal: [0, 1, 0], offset: sub(e.position, hitPoint) };
-    }
-  } else {
-    drag = { ...start, mode: 'orbit', clickEntity: hit ? hit.entity : null };
-  }
+  const pan = ev.button === 2 || ev.button === 1 || (ev.button === 0 && (ev.ctrlKey || ev.metaKey));
+  drag = { x, y, moved: false, mode: pan ? 'pan' : 'orbit', button: ev.button };
 });
 
 glCanvas.addEventListener('pointermove', (ev) => {
@@ -265,32 +354,22 @@ glCanvas.addEventListener('pointermove', (ev) => {
     cam.yaw -= dx * 0.3;
     cam.pitch = clamp(cam.pitch + dy * 0.3, -89, 89);
     app.markDirty();
-  } else if (drag.mode === 'pan') {
+  } else {
     const b = cameraBasis(cam);
-    const k = (cam.distance * b.tanHalf * 2) / glCanvas.clientHeight;
-    cam.target = add(cam.target, add(scale(b.right, -dx * k), scale(b.up, dy * k)));
+    const kpx = (cam.distance * b.tanHalf * 2) / glCanvas.clientHeight;
+    cam.target = add(cam.target, add(scale(b.right, -dx * kpx), scale(b.up, dy * kpx)));
     app.markDirty();
-  } else if (drag.mode === 'move' || drag.mode === 'lift') {
-    const { ro, rd } = rayAt(x, y);
-    const p = intersectPlane(ro, rd, drag.plane, drag.normal);
-    if (!p) return;
-    const e = drag.entity;
-    if (drag.mode === 'move') {
-      e.position = [p[0] + drag.offset[0], e.position[1], p[2] + drag.offset[2]];
-    } else {
-      e.position = [e.position[0], p[1] + drag.offsetY, e.position[2]];
-    }
-    app.markDirty();
-    ui.syncPosition();
   }
 });
 
 function endPointer(ev) {
   if (!pointers.has(ev.pointerId)) return;
   pointers.delete(ev.pointerId);
-  if (drag && drag.mode === 'orbit' && !drag.moved) {
-    // A plain click: select what was under the cursor (or clear selection).
-    app.select(drag.clickEntity ? drag.clickEntity.id : null);
+  if (drag && drag.mode === 'orbit' && drag.button === 0 && !drag.moved) {
+    // A plain click: select what is under the cursor, or clear the selection.
+    const { ro, rd } = rayAt(drag.x, drag.y);
+    const hit = pick(app.scene.entities, ro, rd);
+    app.select(hit ? hit.entity.id : null);
   }
   drag = null;
 }
@@ -308,22 +387,66 @@ glCanvas.addEventListener(
   { passive: false },
 );
 
+// ---------------------------------------------------------------- keyboard
 window.addEventListener('keydown', (ev) => {
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-  if (ev.key === 'Delete' || ev.key === 'Backspace') {
+
+  if (!modal.hidden) {
+    if (ev.key === 'Escape') closeModal();
+    return;
+  }
+  if (!addMenu.hidden) {
+    handleMenuKey(ev);
+    return;
+  }
+
+  const key = ev.key.toLowerCase();
+  const plain = !ev.ctrlKey && !ev.metaKey && !ev.altKey;
+
+  if (tool.active) {
+    // G / R / S switch to another transform, keeping what was done so far.
+    if (plain && !ev.shiftKey && TRANSFORM_KEYS[key]) {
+      ev.preventDefault();
+      tool.start(TRANSFORM_KEYS[key], tool.state.entity, mouse);
+    } else if (tool.handleKey(ev)) {
+      ev.preventDefault();
+    }
+    return;
+  }
+
+  if (ev.shiftKey && plain && key === 'a') {
+    ev.preventDefault();
+    openAddMenu();
+  } else if (ev.shiftKey && plain && key === 'd') {
+    ev.preventDefault();
+    if (app.selected) {
+      app.duplicateSelected({ offset: false });
+      tool.start('grab', app.selected, mouse);
+    }
+  } else if (plain && !ev.shiftKey && TRANSFORM_KEYS[key]) {
+    ev.preventDefault();
+    if (app.selected) tool.start(TRANSFORM_KEYS[key], app.selected, mouse);
+  } else if (ev.key === 'Delete' || ev.key === 'Backspace') {
     ev.preventDefault();
     app.deleteSelected();
-  } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'd') {
+  } else if ((ev.ctrlKey || ev.metaKey) && key === 'd') {
     ev.preventDefault();
     app.duplicateSelected();
   } else if (ev.key === 'Escape') {
-    if (!modal.hidden) closeModal();
-    else app.select(null);
-  } else if (ev.key.toLowerCase() === 'f' && !ev.ctrlKey && !ev.metaKey) {
+    app.select(null);
+  } else if (plain && key === 'f') {
     app.focusOnSelected();
   }
 });
+
+window.addEventListener('keyup', (ev) => {
+  if (tool.active && (ev.key === 'Control' || ev.key === 'Meta')) tool.setSnap(false);
+});
+
+const TRANSFORM_KEYS = { g: 'grab', r: 'rotate', s: 'scale' };
+
+updateHint();
 
 // ---------------------------------------------------------------- render loop
 let rateSamples = 0;
@@ -367,7 +490,7 @@ function frame(now) {
   }
 
   if (app.overlayDirty) {
-    drawOverlay(overlay, basis, app.selected);
+    drawOverlay(overlay, basis, app.selected, { guides: tool.guides() });
     app.overlayDirty = false;
   }
 

@@ -83,6 +83,43 @@ html, body {
   pointer-events: none;
   backdrop-filter: blur(6px);
 }
+#hint.transforming {
+  background: rgba(30, 22, 6, 0.85);
+  color: #ffd79a;
+  font: 12px/1.4 ui-monospace, 'SF Mono', Menlo, monospace;
+}
+#hint .keys { color: #9aa1ae; }
+
+#add-menu {
+  position: absolute;
+  z-index: 5;
+  min-width: 170px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+#add-menu .menu-title {
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+#add-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  text-align: left;
+}
+#add-menu button .key { margin-left: auto; color: var(--muted); font-size: 11px; }
+#add-menu button.active, #add-menu button:hover { background: #2b2516; }
+
 kbd {
   font: inherit;
   border: 1px solid #555;

@@ -22,16 +22,27 @@ Needs a browser with WebGL2 and `EXT_color_buffer_float` (any recent Chrome, Edg
 
 ## Using it
 
+Shortcuts work like Blender's: select first, then transform with the keyboard.
+
 | Action | How |
 | --- | --- |
-| Select | Click an object (or pick it from the Scene list) |
-| Move on the floor plane | Drag an object |
-| Raise / lower | <kbd>Shift</kbd> + drag an object |
-| Orbit camera | Drag empty space |
+| Select | Click an object (or pick it in the Scene list). <kbd>Esc</kbd> deselects |
+| Add object at cursor | <kbd>Shift</kbd>+<kbd>A</kbd>, then click or press the letter shown |
+| Move / rotate / scale | <kbd>G</kbd> / <kbd>R</kbd> / <kbd>S</kbd>, then move the mouse |
+| …along one axis | Press <kbd>X</kbd>, <kbd>Y</kbd> or <kbd>Z</kbd> during the transform (press again to free it) |
+| …everything except one axis | <kbd>Shift</kbd>+<kbd>X</kbd> / <kbd>Y</kbd> / <kbd>Z</kbd> |
+| …by an exact amount | Type a number (units, degrees, or scale factor), e.g. <kbd>G</kbd> <kbd>Z</kbd> <kbd>2</kbd> <kbd>Enter</kbd> |
+| …with snapping | Hold <kbd>Ctrl</kbd> (0.25 units, 5°, ×0.1) |
+| Confirm / cancel | Click or <kbd>Enter</kbd> / right-click or <kbd>Esc</kbd> |
+| Duplicate and move | <kbd>Shift</kbd>+<kbd>D</kbd> (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>D</kbd> duplicates in place, offset) |
+| Delete | <kbd>Delete</kbd> / <kbd>Backspace</kbd> |
+| Focus depth of field on selection | <kbd>F</kbd> |
+| Orbit camera | Drag |
 | Pan | Right-drag (or <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + drag) |
 | Zoom | Mouse wheel / pinch |
-| Delete / duplicate | <kbd>Delete</kbd> / <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>D</kbd> |
-| Focus depth of field on selection | <kbd>F</kbd> |
+
+Move and rotate use world axes; scale uses the object's own axes (so a rotated
+box stretches along its own length). Spheres and lights always scale evenly.
 
 The side panel lets you add spheres, boxes, cylinders and lights, edit position,
 rotation, size and material, and tweak the sky, sun, camera lens and quality
@@ -60,7 +71,8 @@ settings. Scenes auto-save to your browser and can be exported/imported as JSON.
 | `js/shaders.js` | GLSL path tracer + tone-mapping display shader |
 | `js/renderer.js` | WebGL2 setup, scene upload, accumulation buffers |
 | `js/scene.js` | Scene model, material presets, preset scenes, save/load |
-| `js/main.js` | App state, mouse/touch/keyboard interaction, render loop |
+| `js/main.js` | App state, mouse/touch/keyboard interaction, add menu, render loop |
+| `js/transform.js` | Keyboard move / rotate / scale tool |
 | `js/ui.js` | Side panel (scene list, inspector, settings) |
 | `js/picking.js` | CPU ray casting for clicking objects |
 | `js/overlay.js` | Selection outline drawn over the render |

@@ -1,6 +1,6 @@
 // Side panel: add buttons, scene list, inspector and render settings.
 
-import { MATERIAL_PRESETS, MATERIAL_TYPES, PRESETS, makeObject, makeLight } from './scene.js';
+import { MATERIAL_PRESETS, MATERIAL_TYPES, PRESETS, makeDefault } from './scene.js';
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -96,23 +96,9 @@ export class UI {
       const t = app.scene.camera.target;
       return [t[0] + (Math.random() - 0.5), 0, t[2] + (Math.random() - 0.5)];
     };
-    const add = (e) => app.addEntity(e);
-    document.getElementById('add-sphere').onclick = () => {
-      const p = spawnPoint();
-      add(makeObject('sphere', { position: [p[0], 0.75, p[2]], radius: 0.75, material: { ...MATERIAL_PRESETS['Blue plastic'] } }));
-    };
-    document.getElementById('add-box').onclick = () => {
-      const p = spawnPoint();
-      add(makeObject('box', { position: [p[0], 0.6, p[2]], size: [1.2, 1.2, 1.2], material: { ...MATERIAL_PRESETS['Matte white'] } }));
-    };
-    document.getElementById('add-cylinder').onclick = () => {
-      const p = spawnPoint();
-      add(makeObject('cylinder', { position: [p[0], 0.75, p[2]], radius: 0.5, height: 1.5, material: { ...MATERIAL_PRESETS['Copper'] } }));
-    };
-    document.getElementById('add-light').onclick = () => {
-      const p = spawnPoint();
-      add(makeLight({ position: [p[0], 3, p[2]] }));
-    };
+    for (const kind of ['sphere', 'box', 'cylinder', 'light']) {
+      document.getElementById(`add-${kind}`).onclick = () => app.addEntity(makeDefault(kind, spawnPoint()));
+    }
 
     document.getElementById('export').onclick = () => app.exportScene();
     document.getElementById('save-png').onclick = () => app.savePNG();

@@ -67,6 +67,28 @@ export function makeLight(props = {}) {
   };
 }
 
+// A ready-made object of each kind, resting on the surface point `at`.
+export const ADDABLE = [
+  { kind: 'sphere', label: 'Sphere', key: 'S' },
+  { kind: 'box', label: 'Box', key: 'B' },
+  { kind: 'cylinder', label: 'Cylinder', key: 'C' },
+  { kind: 'light', label: 'Light', key: 'L' },
+];
+
+export function makeDefault(kind, at = [0, 0, 0]) {
+  const [x, y, z] = at;
+  if (kind === 'sphere') {
+    return makeObject('sphere', { position: [x, y + 0.75, z], radius: 0.75, material: { ...MATERIAL_PRESETS['Blue plastic'] } });
+  }
+  if (kind === 'box') {
+    return makeObject('box', { position: [x, y + 0.6, z], size: [1.2, 1.2, 1.2], material: { ...MATERIAL_PRESETS['Matte white'] } });
+  }
+  if (kind === 'cylinder') {
+    return makeObject('cylinder', { position: [x, y + 0.75, z], radius: 0.5, height: 1.5, material: { ...MATERIAL_PRESETS['Copper'] } });
+  }
+  return makeLight({ position: [x, y + 2.5, z] });
+}
+
 export function cloneEntity(e) {
   const copy = JSON.parse(JSON.stringify(e));
   copy.id = newId();

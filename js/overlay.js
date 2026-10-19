@@ -50,7 +50,7 @@ function outline(e) {
   return edges.map((r) => r.map(toWorld));
 }
 
-export function drawOverlay(canvas, basis, entity, { showDropLine = true } = {}) {
+export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides = null } = {}) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
@@ -61,6 +61,8 @@ export function drawOverlay(canvas, basis, entity, { showDropLine = true } = {})
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   if (!entity) return;
+
+  if (guides) drawGuides(ctx, basis, guides, w, h);
 
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = ACCENT;
@@ -93,6 +95,38 @@ export function drawOverlay(canvas, basis, entity, { showDropLine = true } = {})
       ctx.fillStyle = ACCENT;
       ctx.fill();
     }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Constraint axes through the object, plus a dashed line from the object to
+// the cursor while rotating or scaling.
+function drawGuides(ctx, basis, guides, w, h) {
+  ctx.lineWidth = 1.5;
+  for (const { dir, color } of guides.axes) {
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    let pen = false;
+    for (let i = -200; i <= 200; i++) {
+      const t = Math.sign(i) * (i * i) / 400; // denser near the object
+      const s = project(basis, add(guides.origin, dir.map((v) => v * t)), w, h);
+      if (!s) { pen = false; continue; }
+      if (pen) ctx.lineTo(s[0], s[1]);
+      else { ctx.moveTo(s[0], s[1]); pen = true; }
+    }
+    ctx.stroke();
+  }
+  if (guides.line) {
+    const [a, b] = guides.line;
+    ctx.strokeStyle = '#ffffff';
+    ctx.globalAlpha = 0.7;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
   ctx.globalAlpha = 1;
 }
