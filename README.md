@@ -56,6 +56,8 @@ turns that object into a polygon mesh (a one-way change). Shift+A → Plane adds
 | Select, add to selection | Click, <kbd>Shift</kbd>+click |
 | Select all / none | <kbd>A</kbd> / <kbd>Alt</kbd>+<kbd>A</kbd> |
 | Move / rotate / scale selection | <kbd>G</kbd> / <kbd>R</kbd> / <kbd>S</kbd>, with the same axis keys, numbers and snapping as objects |
+| Extrude | <kbd>E</kbd>: selected faces move out along their normal with new side walls (type a distance, or press <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd> for a world axis). With only edges selected, extrudes the edges |
+| Inset | <kbd>I</kbd>: each selected face shrinks inward, leaving a border ring. Drag or type a thickness |
 | Delete selection (and faces using it) | <kbd>X</kbd> or <kbd>Delete</kbd> |
 | Center view on selection | <kbd>.</kbd> |
 | Back to object mode | <kbd>Tab</kbd> |
@@ -99,7 +101,8 @@ settings. Scenes auto-save to your browser and can be exported/imported as JSON.
 | `js/scene.js` | Scene model, material presets, preset scenes, save/load |
 | `js/main.js` | App state, mouse/touch/keyboard interaction, add menu, render loop |
 | `js/transform.js` | Keyboard move / rotate / scale tool (objects and mesh vertices) |
-| `js/editmode.js` | Mesh edit mode: selection, picking, delete |
+| `js/editmode.js` | Mesh edit mode: selection, picking, extrude, inset, delete |
+| `js/history.js` | Undo / redo snapshots |
 | `js/mesh.js` | Mesh building, normals, triangulation and the BVH used for ray tracing meshes |
 | `js/ui.js` | Side panel (scene list, inspector, settings) |
 | `js/picking.js` | CPU ray casting for clicking objects |

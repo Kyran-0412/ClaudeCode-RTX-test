@@ -101,6 +101,8 @@ export class UI {
       document.getElementById(`add-${kind}`).onclick = () => app.addEntity(makeDefault(kind, spawnPoint()));
     }
 
+    document.getElementById('undo').onclick = () => app.undo();
+    document.getElementById('redo').onclick = () => app.redo();
     document.getElementById('export').onclick = () => app.exportScene();
     document.getElementById('save-png').onclick = () => app.savePNG();
     const file = document.getElementById('import-file');
@@ -270,6 +272,8 @@ export class UI {
       h(
         'div',
         { class: 'button-row' },
+        h('button', { text: 'Extrude', title: 'E', disabled: !n, onclick: () => app.startExtrude() }),
+        h('button', { text: 'Inset', title: 'I', disabled: !n, onclick: () => app.startInset() }),
         h('button', { text: 'Select all', title: 'A', onclick: () => { edit.selectAll(); app.editSelectionChanged(); } }),
         h('button', { class: 'danger', text: 'Delete', title: 'Delete / X', disabled: !n, onclick: () => app.deleteSelected() }),
         h('button', { text: 'Done', title: 'Tab', onclick: () => app.exitEdit() }),

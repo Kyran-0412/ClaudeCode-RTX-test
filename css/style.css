@@ -212,6 +212,8 @@ kbd {
   padding: 14px;
   border-bottom: 1px solid var(--line);
 }
+.brand-actions { display: flex; gap: 4px; align-items: center; }
+.icon-btn { width: 30px; height: 30px; padding: 0; font-size: 16px; line-height: 1; }
 .brand h1 { margin: 0; font-size: 18px; letter-spacing: 0.02em; }
 .brand h1::before { content: '◉ '; color: var(--accent); }
 .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }

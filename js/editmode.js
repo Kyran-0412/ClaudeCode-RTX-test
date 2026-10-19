@@ -2,8 +2,11 @@
 // Transforms reuse the G / R / S tool through a VertexTarget.
 
 import { objectFrame, convertToMesh } from './scene.js';
-import { meshEdges, edgeKey, faceCenter, localAccel, raycastBVH, deleteFaces, touchMesh } from './mesh.js';
-import { add, sub, mulMatVec } from './math.js';
+import {
+  meshEdges, edgeKey, faceCenter, localAccel, raycastBVH, deleteFaces, touchMesh,
+  newell, extrudeFaces, extrudeEdges, insetFaces,
+} from './mesh.js';
+import { add, sub, mulMatVec, normalize, length } from './math.js';
 
 export const SELECT_MODES = ['vert', 'edge', 'face'];
 export const SELECT_MODE_NAMES = { vert: 'Vertex', edge: 'Edge', face: 'Face' };
@@ -79,6 +82,89 @@ export class EditMode {
     if (this.mode === 'vert') this.mesh.vertices.forEach((_, i) => this.verts.add(i));
     else if (this.mode === 'edge') for (const [a, b] of meshEdges(this.mesh)) this.edges.add(edgeKey(a, b));
     else this.mesh.faces.forEach((_, i) => this.faces.add(i));
+  }
+
+  // Plain-data copy of the selection (for undo and for cancelling extrudes).
+  saveSelection() {
+    return { mode: this.mode, verts: [...this.verts], edges: [...this.edges], faces: [...this.faces] };
+  }
+
+  restoreSelection(sel) {
+    this.mode = sel.mode;
+    this.verts = new Set(sel.verts);
+    this.edges = new Set(sel.edges);
+    this.faces = new Set(sel.faces);
+  }
+
+  // Faces covered by the selection (every vertex selected).
+  coveredFaces() {
+    if (this.mode === 'face') return new Set(this.faces);
+    const vs = this.selectedVerts();
+    const out = new Set();
+    this.mesh.faces.forEach((f, i) => { if (f.every((v) => vs.has(v))) out.add(i); });
+    return out;
+  }
+
+  // Selects `verts` in the current mode (edges / faces they fully cover).
+  selectVerts(verts, faces = null) {
+    this.clear();
+    if (this.mode === 'vert') this.verts = new Set(verts);
+    else if (this.mode === 'edge') {
+      for (const [a, b] of meshEdges(this.mesh)) if (verts.has(a) && verts.has(b)) this.edges.add(edgeKey(a, b));
+    } else if (faces) this.faces = new Set(faces);
+    else this.mesh.faces.forEach((f, i) => { if (f.every((v) => verts.has(v))) this.faces.add(i); });
+  }
+
+  setMesh(mesh) {
+    mesh.version = this.mesh.version || 0;
+    this.entity.mesh = mesh;
+    touchMesh(mesh);
+  }
+
+  // ---------------------------------------------------------------- modelling
+  // Extrudes covered faces (or, failing that, selected edges). Returns the
+  // vertices that should move, the direction to move them (face region
+  // normal, or null), and the state to go back to if the move is cancelled.
+  extrude() {
+    const saved = { mesh: JSON.parse(JSON.stringify(this.mesh)), sel: this.saveSelection() };
+    const faces = this.coveredFaces();
+    if (faces.size) {
+      const { toWorld } = this.frame();
+      const world = this.mesh.vertices.map(toWorld);
+      const n = [0, 0, 0];
+      for (const fi of faces) {
+        const fn = newell(world, this.mesh.faces[fi]);
+        for (let k = 0; k < 3; k++) n[k] += fn[k];
+      }
+      const { mesh, moved } = extrudeFaces(this.mesh, faces);
+      this.setMesh(mesh);
+      this.selectVerts(moved, faces);
+      return { moved, axis: length(n) > 1e-9 ? normalize(n) : null, saved };
+    }
+    let edges = [];
+    if (this.mode === 'edge') edges = [...this.edges].map((k) => k.split('-').map(Number));
+    else if (this.mode === 'vert') edges = meshEdges(this.mesh).filter(([a, b]) => this.verts.has(a) && this.verts.has(b));
+    if (!edges.length) return null;
+    const { mesh, moved } = extrudeEdges(this.mesh, edges);
+    this.setMesh(mesh);
+    this.selectVerts(moved);
+    return { moved, axis: null, saved };
+  }
+
+  // Splits covered faces into an inner face and a border ring.
+  inset() {
+    const faces = this.coveredFaces();
+    if (!faces.size) return null;
+    const saved = { mesh: JSON.parse(JSON.stringify(this.mesh)), sel: this.saveSelection() };
+    const { mesh, corners } = insetFaces(this.mesh, faces);
+    this.setMesh(mesh);
+    this.selectVerts(new Set(corners.map((c) => c.w)), faces);
+    return { corners, saved };
+  }
+
+  restoreState(saved) {
+    this.setMesh(saved.mesh);
+    this.restoreSelection(saved.sel);
   }
 
   // ---------------------------------------------------------------- geometry

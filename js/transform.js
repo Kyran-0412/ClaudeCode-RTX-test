@@ -8,15 +8,16 @@
 // The tool works on a "target": a whole object (EntityTarget) or the selected
 // vertices of a mesh in edit mode (VertexTarget).
 
-import { add, sub, scale, dot, normalize, rotationMatrix, mulMatVec, DEG } from './math.js';
+import { add, sub, scale, dot, cross, length, normalize, rotationMatrix, mulMatVec, DEG } from './math.js';
 import { project } from './camera.js';
 import { objectFrame } from './scene.js';
-import { touchMesh } from './mesh.js';
+import { touchMesh, newell, faceCenter } from './mesh.js';
 
 export const AXIS_DIRS = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 export const AXIS_COLORS = ['#ff5b5b', '#7bd88f', '#5fa4ff'];
-const AXIS_NAMES = ['X', 'Y', 'Z'];
-const MODE_NAMES = { grab: 'Move', rotate: 'Rotate', scale: 'Scale' };
+const AXIS_NAMES = ['X', 'Y', 'Z', 'Normal'];
+const CUSTOM_AXIS = 3; // index used for a non-world axis, e.g. a face normal
+const MODE_NAMES = { grab: 'Move', rotate: 'Rotate', scale: 'Scale', inset: 'Inset' };
 
 // Rotation of angle `a` (radians) around unit axis `k` (Rodrigues).
 function axisAngle(k, a) {
@@ -146,6 +147,50 @@ export class VertexTarget {
   }
 }
 
+// New inner vertices made by insetFaces(), slid inward by `amount` (world
+// units) along each corner's bisector so the border has an even width.
+export class InsetTarget {
+  constructor(entity, corners) {
+    this.entity = entity;
+    const { M, inv } = objectFrame(entity);
+    const toWorld = (v) => add(entity.position, mulMatVec(M, v));
+    this.toLocal = (w) => mulMatVec(inv, sub(w, entity.position));
+    const verts = entity.mesh.vertices;
+    const faces = new Set(corners.map((c) => c.face));
+    this.label = `${faces.size} face${faces.size === 1 ? '' : 's'}`;
+    const c = [0, 0, 0];
+    this.items = corners.map((corner) => {
+      const fw = corner.face.map((v) => toWorld(verts[v]));
+      const n = normalize(newell(fw, [...fw.keys()]));
+      const center = faceCenter(fw, [...fw.keys()]);
+      const P = toWorld(verts[corner.v]);
+      const e1 = normalize(sub(P, toWorld(verts[corner.prev])));
+      const e2 = normalize(sub(toWorld(verts[corner.next]), P));
+      // For a counter-clockwise face, normal x edge points into the face.
+      const i1 = normalize(cross(n, e1)), i2 = normalize(cross(n, e2));
+      const sum = add(i1, i2);
+      const dir = length(sum) > 1e-6 ? normalize(sum) : i1;
+      for (let k = 0; k < 3; k++) c[k] += P[k] / corners.length;
+      return { w: corner.w, P, dir, k: 1 / Math.max(dot(dir, i1), 0.2), max: length(sub(center, P)) * 0.98 };
+    });
+    this.center = c;
+  }
+
+  pivot() { return this.center; }
+  scaleAxes() { return AXIS_DIRS; }
+  restore() { this.apply({ amount: 0 }); }
+
+  apply(op) {
+    const verts = this.entity.mesh.vertices.slice();
+    for (const it of this.items) {
+      const off = Math.min(Math.max(0, op.amount || 0) * it.k, it.max);
+      verts[it.w] = this.toLocal(add(it.P, scale(it.dir, off)));
+    }
+    this.entity.mesh.vertices = verts;
+    touchMesh(this.entity.mesh);
+  }
+}
+
 // ---------------------------------------------------------------- tool
 export class TransformTool {
   // ctx: { basis(), size() -> [w, h], rayAt(x, y) -> {ro, rd}, onChange(), onEnd() }
@@ -158,7 +203,10 @@ export class TransformTool {
     return !!this.state;
   }
 
-  start(mode, target, mouse) {
+  // opts.axisDir: start constrained to this world direction (extrude).
+  // opts.title: label shown instead of the mode name.
+  // opts.onCancel: extra clean-up when the user cancels (e.g. undo an extrude).
+  start(mode, target, mouse, opts = {}) {
     if (this.state) this.confirm();
     const [w, h] = this.ctx.size();
     const basis = this.ctx.basis();
@@ -171,7 +219,10 @@ export class TransformTool {
       mouse0: mouse.slice(),
       mouse: mouse.slice(),
       prevMouse: mouse.slice(),
-      axis: -1,
+      axis: opts.axisDir ? CUSTOM_AXIS : -1,
+      customAxis: opts.axisDir ? normalize(opts.axisDir) : null,
+      title: opts.title || null,
+      onCancel: opts.onCancel || null,
       exclude: false,
       typed: '',
       snap: false,
@@ -210,7 +261,7 @@ export class TransformTool {
     const lower = k.toLowerCase();
     if (k === 'Escape') { this.cancel(); return true; }
     if (k === 'Enter') { this.confirm(); return true; }
-    if (lower === 'x' || lower === 'y' || lower === 'z') {
+    if ((lower === 'x' || lower === 'y' || lower === 'z') && s.mode !== 'inset') {
       const axis = 'xyz'.indexOf(lower);
       const exclude = ev.shiftKey;
       if (s.axis === axis && s.exclude === exclude) s.axis = -1; // same key again clears
@@ -243,6 +294,7 @@ export class TransformTool {
     const s = this.state;
     if (!s) return;
     s.target.restore();
+    if (s.onCancel) s.onCancel();
     this.state = null;
     this.ctx.onChange();
     this.ctx.onEnd(false);
@@ -261,7 +313,7 @@ export class TransformTool {
     const p0 = s.pivot;
     if (s.axis >= 0 && !s.exclude) {
       // Closest point on the axis line to the mouse ray.
-      const a = AXIS_DIRS[s.axis];
+      const a = s.axis === CUSTOM_AXIS ? s.customAxis : AXIS_DIRS[s.axis];
       const w0 = sub(p0, ro);
       const b = dot(a, rd), d = dot(a, w0), e = dot(rd, w0);
       const denom = 1 - b * b;
@@ -284,7 +336,9 @@ export class TransformTool {
 
     if (s.mode === 'grab') {
       let delta;
-      if (typed !== null) {
+      if (typed !== null && s.axis === CUSTOM_AXIS) {
+        delta = scale(s.customAxis, typed);
+      } else if (typed !== null) {
         const ax = s.axis >= 0 && !s.exclude ? s.axis : (s.exclude && s.axis === 0 ? 1 : 0);
         delta = scale(AXIS_DIRS[ax], typed);
       } else {
@@ -310,6 +364,17 @@ export class TransformTool {
       if (typed === null && s.snap) deg = snapTo(deg, 5);
       op = { mode: 'rotate', axis: normalize(axis), angle: deg * DEG };
       s.display = `${deg.toFixed(1)}°`;
+    } else if (s.mode === 'inset') {
+      // Drag distance from where the inset started, converted to world units
+      // at the selection's depth.
+      const basis = this.ctx.basis();
+      const [, h] = this.ctx.size();
+      const depth = Math.max(0.1, dot(sub(s.pivot, basis.pos), basis.fwd));
+      const perPixel = (depth * 2 * basis.tanHalf) / h;
+      let amount = typed !== null ? Math.abs(typed) : Math.hypot(s.mouse[0] - s.mouse0[0], s.mouse[1] - s.mouse0[1]) * perPixel * 0.5;
+      if (typed === null && s.snap) amount = snapTo(amount, 0.05);
+      op = { mode: 'inset', amount };
+      s.display = `thickness ${amount.toFixed(3)}`;
     } else {
       const d0 = Math.max(Math.hypot(s.mouse0[0] - s.c2d[0], s.mouse0[1] - s.c2d[1]), 10);
       const d1 = Math.hypot(s.mouse[0] - s.c2d[0], s.mouse[1] - s.c2d[1]);
@@ -323,7 +388,7 @@ export class TransformTool {
 
     const localScale = s.mode === 'scale' && s.axis >= 0 && s.target instanceof EntityTarget;
     s.status = [
-      MODE_NAMES[s.mode] + (s.target.label ? ` ${s.target.label}` : ''),
+      (s.title || MODE_NAMES[s.mode]) + (s.target.label ? ` ${s.target.label}` : ''),
       axisLabel && (localScale ? `local ${axisLabel}` : axisLabel),
       s.typed ? `${s.typed}▏` : s.display,
     ].filter(Boolean).join(' · ');
@@ -336,12 +401,15 @@ export class TransformTool {
     if (!s) return null;
     let axes = [];
     if (s.axis >= 0) {
-      const dirs = s.mode === 'scale' ? s.target.scaleAxes() : AXIS_DIRS;
-      axes = s.exclude
+      const dirs = s.mode === 'scale' ? s.target.scaleAxes() : [...AXIS_DIRS, s.customAxis];
+      axes = s.axis === CUSTOM_AXIS
+        ? [{ dir: s.customAxis, color: '#ffffff' }]
+        : s.exclude
         ? [0, 1, 2].filter((i) => i !== s.axis).map((i) => ({ dir: dirs[i], color: AXIS_COLORS[i] }))
         : [{ dir: dirs[s.axis], color: AXIS_COLORS[s.axis] }];
     }
-    return { origin: s.pivot, axes, line: s.mode === 'grab' ? null : [s.c2d, s.mouse] };
+    const line = s.mode === 'grab' ? null : s.mode === 'inset' ? [s.mouse0, s.mouse] : [s.c2d, s.mouse];
+    return { origin: s.pivot, axes, line };
   }
 }
 

@@ -28,6 +28,11 @@ export const MATERIAL_PRESETS = {
 let nextId = 1;
 const newId = () => nextId++;
 
+// After restoring entities with their own ids (undo), keep new ids unique.
+export function reserveIds(entities) {
+  for (const e of entities) nextId = Math.max(nextId, (e.id || 0) + 1);
+}
+
 const defaultMaterial = () => ({
   type: 'diffuse',
   color: '#cccccc',

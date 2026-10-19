@@ -1,7 +1,8 @@
 import { Renderer } from './renderer.js';
 import { UI } from './ui.js';
-import { PRESETS, ADDABLE, makeDefault, cloneEntity, serialize, deserialize } from './scene.js';
-import { TransformTool, EntityTarget, VertexTarget } from './transform.js';
+import { PRESETS, ADDABLE, makeDefault, cloneEntity, serialize, deserialize, reserveIds } from './scene.js';
+import { TransformTool, EntityTarget, VertexTarget, InsetTarget } from './transform.js';
+import { History } from './history.js';
 import { EditMode, SELECT_MODES, SELECT_MODE_NAMES } from './editmode.js';
 import { cameraBasis, screenRay, project } from './camera.js';
 import { pick } from './picking.js';
@@ -63,10 +64,37 @@ const app = {
     this.sceneDirty = true;
     this.overlayDirty = true;
     scheduleSave();
+    this.scheduleCommit();
   },
   markDisplayDirty() {
     this.displayDirty = true;
     scheduleSave();
+    this.scheduleCommit();
+  },
+
+  // ---------------------------------------------------------------- undo
+  // Changes are recorded shortly after they settle (so a slider drag is one
+  // step), or right away when a transform finishes.
+  scheduleCommit() {
+    clearTimeout(this.commitTimer);
+    if (!this.history || this.tool?.active) return;
+    this.commitTimer = setTimeout(() => this.commitNow(), 400);
+  },
+  commitNow() {
+    clearTimeout(this.commitTimer);
+    if (this.history && !this.tool?.active) this.history.commit();
+  },
+  undo() {
+    if (this.tool?.active) return;
+    this.commitNow();
+    if (this.history.undo()) showToast('Undo');
+    else showToast('Nothing to undo');
+  },
+  redo() {
+    if (this.tool?.active) return;
+    this.commitNow();
+    if (this.history.redo()) showToast('Redo');
+    else showToast('Nothing to redo');
   },
 
   addEntity(e) {
@@ -252,11 +280,84 @@ const tool = new TransformTool({
     app.overlayDirty = true;
     ui.renderInspector();
     updateHint();
+    app.commitNow();
   },
 });
 app.tool = tool;
 const edit = new EditMode();
 app.edit = edit;
+
+// ---------------------------------------------------------------- history
+// The `version` field on meshes only tracks cache freshness, so it's left out.
+const snapshotJSON = () =>
+  JSON.stringify({ entities: app.scene.entities, settings: app.scene.settings }, (key, v) => (key === 'version' ? undefined : v));
+
+app.history = new History({
+  capture: () => ({
+    key: snapshotJSON(),
+    extra: {
+      selectedId: app.selectedId,
+      edit: edit.active ? { entityId: edit.entity.id, ...edit.saveSelection() } : null,
+    },
+  }),
+  restore: (snap) => {
+    const data = JSON.parse(snap.key);
+    app.scene.entities = data.entities;
+    app.scene.settings = data.settings;
+    reserveIds(data.entities);
+    const { selectedId, edit: editState } = snap.extra;
+    // Keep the current selection when it still exists; undo shouldn't deselect.
+    const exists = (id) => data.entities.some((e) => e.id === id);
+    app.selectedId = exists(app.selectedId) ? app.selectedId : exists(selectedId) ? selectedId : null;
+    const target = editState && data.entities.find((e) => e.id === editState.entityId && e.shape === 'mesh');
+    if (target) {
+      edit.entity = target;
+      edit.restoreSelection(editState);
+    } else {
+      edit.exit();
+    }
+    app.sceneDirty = true;
+    app.displayDirty = true;
+    app.overlayDirty = true;
+    scheduleSave();
+    ui.refresh();
+    updateHint();
+  },
+});
+app.history.commit();
+
+// Record any pending change as its own undo step before a tool starts.
+const startTool = tool.start.bind(tool);
+tool.start = (...args) => {
+  if (!tool.active) app.commitNow();
+  startTool(...args);
+};
+
+// ---------------------------------------------------------------- extrude / inset
+function startExtrude() {
+  app.commitNow();
+  const r = edit.extrude();
+  if (!r) { showToast('Select faces or edges to extrude.'); return; }
+  app.markDirty();
+  // Unwrapped start: the new, not-yet-moved geometry isn't its own undo step.
+  startTool('grab', new VertexTarget(edit.entity, r.moved), mouse, {
+    title: 'Extrude',
+    axisDir: r.axis,
+    onCancel: () => { edit.restoreState(r.saved); app.markDirty(); },
+  });
+}
+app.startExtrude = startExtrude;
+
+function startInset() {
+  app.commitNow();
+  const r = edit.inset();
+  if (!r) { showToast('Select one or more faces to inset.'); return; }
+  app.markDirty();
+  startTool('inset', new InsetTarget(edit.entity, r.corners), mouse, {
+    onCancel: () => { edit.restoreState(r.saved); app.markDirty(); },
+  });
+}
+app.startInset = startInset;
 
 // The thing G / R / S act on: selected vertices in edit mode, else the object.
 function transformTarget() {
@@ -297,12 +398,12 @@ function updateHint() {
     modeBadge.textContent = `Edit mode · ${SELECT_MODE_NAMES[edit.mode]}`;
     hint.innerHTML =
       `${k('1')} vertex ${k('2')} edge ${k('3')} face · click select (${k('Shift')} adds) · ${k('A')} all · ` +
-      `${k('G')} ${k('R')} ${k('S')} transform · ${k('Del')} delete · ${k('Tab')} done`;
+      `${k('G')} ${k('R')} ${k('S')} transform · ${k('E')} extrude · ${k('I')} inset · ${k('X')} delete · ${k('Tab')} done`;
     return;
   }
   hint.innerHTML = app.selected
     ? `${k('G')} move · ${k('R')} rotate · ${k('S')} scale · ${k('Tab')} edit mesh · ${k('.')} center view · ${k('Shift')}+${k('D')} duplicate · ${k('Del')} delete · ${k('Shift')}+${k('A')} add`
-    : `Click: select · ${k('Shift')}+${k('A')} add · ${k('1')} ${k('2')} ${k('3')} view · Drag: orbit · Right-drag: pan · Wheel: zoom`;
+    : `Click: select · ${k('Shift')}+${k('A')} add · ${k('1')} ${k('2')} ${k('3')} view · ${k('Ctrl')}+${k('Z')} undo · Drag: orbit · Right-drag: pan · Wheel: zoom`;
 }
 
 // ---------------------------------------------------------------- add menu
@@ -484,6 +585,15 @@ window.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') closeModal();
     return;
   }
+
+  const mod = ev.ctrlKey || ev.metaKey;
+  if (mod && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
+    ev.preventDefault();
+    if (!addMenu.hidden) closeAddMenu();
+    if (ev.key.toLowerCase() === 'y' || ev.shiftKey) app.redo();
+    else app.undo();
+    return;
+  }
   if (!addMenu.hidden) {
     handleMenuKey(ev);
     return;
@@ -526,6 +636,12 @@ window.addEventListener('keydown', (ev) => {
       ev.preventDefault();
       const target = transformTarget();
       if (target) tool.start(TRANSFORM_KEYS[key], target, mouse);
+    } else if (plain && !ev.shiftKey && key === 'e') {
+      ev.preventDefault();
+      startExtrude();
+    } else if (plain && !ev.shiftKey && key === 'i') {
+      ev.preventDefault();
+      startInset();
     } else if (ev.key === 'Delete' || ev.key === 'Backspace' || (plain && !ev.shiftKey && key === 'x')) {
       ev.preventDefault();
       app.deleteSelected();

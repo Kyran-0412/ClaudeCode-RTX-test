@@ -324,3 +324,97 @@ export function localAccel(mesh) {
 export function touchMesh(mesh) {
   mesh.version = (mesh.version || 0) + 1;
 }
+
+// ---------------------------------------------------------------- editing ops
+const cloneMesh = (mesh) => ({ ...mesh, vertices: mesh.vertices.map((v) => v.slice()), faces: mesh.faces.map((f) => f.slice()) });
+
+// Drops vertices no face uses. Returns the new mesh and an old -> new index map.
+export function compactVertices(mesh) {
+  const used = new Set();
+  for (const f of mesh.faces) for (const v of f) used.add(v);
+  const remap = new Map();
+  const vertices = [];
+  mesh.vertices.forEach((v, i) => {
+    if (used.has(i)) { remap.set(i, vertices.length); vertices.push(v); }
+  });
+  return { mesh: { ...mesh, vertices, faces: mesh.faces.map((f) => f.map((v) => remap.get(v))) }, remap };
+}
+
+// Extrudes a region of faces: the faces move onto copies of their vertices and
+// side walls join the region's outline to the copies. Face indices of the
+// region are unchanged. Returns the new mesh and the copied (moving) vertices.
+export function extrudeFaces(mesh, faceSet) {
+  const out = cloneMesh(mesh);
+  const uses = new Map();
+  for (const fi of faceSet) {
+    const f = mesh.faces[fi];
+    for (let i = 0; i < f.length; i++) {
+      const key = edgeKey(f[i], f[(i + 1) % f.length]);
+      uses.set(key, (uses.get(key) || 0) + 1);
+    }
+  }
+  const dup = new Map();
+  const copyOf = (v) => {
+    if (!dup.has(v)) { dup.set(v, out.vertices.length); out.vertices.push(mesh.vertices[v].slice()); }
+    return dup.get(v);
+  };
+  const sides = [];
+  for (const fi of faceSet) {
+    const f = mesh.faces[fi];
+    for (let i = 0; i < f.length; i++) {
+      const a = f[i], b = f[(i + 1) % f.length];
+      // Outline edge a->b: the wall runs a->b on the old ring, b'->a' on the new.
+      if (uses.get(edgeKey(a, b)) === 1) sides.push([a, b, copyOf(b), copyOf(a)]);
+    }
+  }
+  for (const fi of faceSet) out.faces[fi] = mesh.faces[fi].map(copyOf);
+  out.faces.push(...sides);
+  const { mesh: compact, remap } = compactVertices(out);
+  return { mesh: compact, moved: new Set([...dup.values()].map((v) => remap.get(v))) };
+}
+
+// Extrudes edges into new quads. Returns the new mesh and the copied vertices.
+export function extrudeEdges(mesh, edges) {
+  const out = cloneMesh(mesh);
+  const directed = new Map();
+  for (const f of mesh.faces) {
+    for (let i = 0; i < f.length; i++) {
+      const a = f[i], b = f[(i + 1) % f.length];
+      if (!directed.has(edgeKey(a, b))) directed.set(edgeKey(a, b), [a, b]);
+    }
+  }
+  const dup = new Map();
+  const copyOf = (v) => {
+    if (!dup.has(v)) { dup.set(v, out.vertices.length); out.vertices.push(mesh.vertices[v].slice()); }
+    return dup.get(v);
+  };
+  for (const [a, b] of edges) {
+    const [p, q] = directed.get(edgeKey(a, b)) || [a, b];
+    // A face already runs p->q along this edge, so the new one runs q->p.
+    out.faces.push([q, p, copyOf(p), copyOf(q)]);
+  }
+  return { mesh: out, moved: new Set(dup.values()) };
+}
+
+// Insets each face on its own: the face is replaced by a smaller copy (same
+// index) plus a ring of quads. New vertices start on top of the originals;
+// `corners` says where each one is so the caller can slide it inward.
+export function insetFaces(mesh, faceSet) {
+  const out = cloneMesh(mesh);
+  const corners = [];
+  for (const fi of faceSet) {
+    const f = mesh.faces[fi];
+    const inner = f.map((v, i) => {
+      const w = out.vertices.length;
+      out.vertices.push(mesh.vertices[v].slice());
+      corners.push({ v, w, prev: f[(i + f.length - 1) % f.length], next: f[(i + 1) % f.length], face: f });
+      return w;
+    });
+    for (let i = 0; i < f.length; i++) {
+      const j = (i + 1) % f.length;
+      out.faces.push([f[i], f[j], inner[j], inner[i]]);
+    }
+    out.faces[fi] = inner;
+  }
+  return { mesh: out, corners };
+}

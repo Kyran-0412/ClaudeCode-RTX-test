@@ -33,11 +33,15 @@
         <header class="brand">
           <div>
             <h1>Lumen</h1>
-            <p>Physically based path tracer</p>
+            <p>GPU path tracer</p>
           </div>
-          <select id="preset" aria-label="Load preset scene">
-            <option value="">Load scene…</option>
-          </select>
+          <div class="brand-actions">
+            <button id="undo" class="icon-btn" title="Undo (Ctrl/⌘+Z)" aria-label="Undo">↶</button>
+            <button id="redo" class="icon-btn" title="Redo (Ctrl/⌘+Shift+Z)" aria-label="Redo">↷</button>
+            <select id="preset" aria-label="Load preset scene">
+              <option value="">Load scene…</option>
+            </select>
+          </div>
         </header>
 
         <section>
