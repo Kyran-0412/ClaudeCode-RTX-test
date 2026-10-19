@@ -109,32 +109,63 @@ const app = {
   },
 
   exportScene() {
-    download(new Blob([serialize(this.scene)], { type: 'application/json' }), 'scene.json');
+    const text = serialize(this.scene);
+    const area = document.createElement('textarea');
+    area.id = 'export-text';
+    area.readOnly = true;
+    area.value = text;
+    const copy = document.createElement('button');
+    copy.textContent = 'Copy to clipboard';
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        copy.textContent = 'Copied';
+      } catch {
+        area.select();
+        copy.textContent = 'Press Ctrl/⌘+C to copy';
+      }
+    };
+    showModal('Scene file', 'Copy this text and save it as a .json file. Use Import scene to load it again.', area, copy);
   },
 
   importScene(text) {
     try {
       this.setScene(deserialize(text));
     } catch (err) {
-      alert('Could not load scene: ' + err.message);
+      showModal('Could not load scene', `That file isn't a Lumen scene (${err.message}). Pick a .json file made with Export scene.`);
     }
   },
 
   savePNG() {
-    glCanvas.toBlob((blob) => blob && download(blob, `render-${renderer.frame}spp.png`), 'image/png');
+    glCanvas.toBlob((blob) => {
+      if (!blob) return;
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(blob);
+      img.alt = `Render at ${renderer.frame} samples per pixel`;
+      showModal(`Render · ${renderer.frame} spp`, 'Right-click the image (or long-press on a phone) and choose Save Image.', img);
+    }, 'image/png');
   },
 };
 
 const ui = new UI(app);
 ui.refresh();
 
-function download(blob, name) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+// Simple in-page dialog (browser alerts and downloads are blocked when the
+// app is embedded, so results are shown here instead).
+const modal = document.getElementById('modal');
+function showModal(title, message, ...content) {
+  modal.querySelector('h2').textContent = title;
+  modal.querySelector('p').textContent = message;
+  const body = modal.querySelector('.modal-body');
+  for (const img of body.querySelectorAll('img')) URL.revokeObjectURL(img.src);
+  body.replaceChildren(...content);
+  modal.hidden = false;
 }
+function closeModal() {
+  modal.hidden = true;
+}
+modal.addEventListener('click', (ev) => { if (ev.target === modal) closeModal(); });
+document.getElementById('modal-close').onclick = closeModal;
 
 let saveTimer = 0;
 function scheduleSave() {
@@ -287,7 +318,8 @@ window.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     app.duplicateSelected();
   } else if (ev.key === 'Escape') {
-    app.select(null);
+    if (!modal.hidden) closeModal();
+    else app.select(null);
   } else if (ev.key.toLowerCase() === 'f' && !ev.ctrlKey && !ev.metaKey) {
     app.focusOnSelected();
   }
