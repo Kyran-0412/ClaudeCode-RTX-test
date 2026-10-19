@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lumen Path Tracer</title>
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <main id="viewport">
+        <canvas id="gl"></canvas>
+        <canvas id="overlay"></canvas>
+        <div id="hud">
+          <span id="stat-samples">0 spp</span>
+          <span id="stat-rate"></span>
+        </div>
+        <div id="hint">
+          Drag object: move · <kbd>Shift</kbd>+drag: lift · Drag empty space: orbit ·
+          Right-drag: pan · Wheel: zoom
+        </div>
+        <div id="error" hidden></div>
+      </main>
+
+      <aside id="panel">
+        <header class="brand">
+          <div>
+            <h1>Lumen</h1>
+            <p>Physically based path tracer</p>
+          </div>
+          <select id="preset" aria-label="Load preset scene">
+            <option value="">Load scene…</option>
+          </select>
+        </header>
+
+        <section>
+          <h2>Add</h2>
+          <div class="add-grid">
+            <button id="add-sphere"><span class="icon icon-sphere"></span>Sphere</button>
+            <button id="add-box"><span class="icon icon-box"></span>Box</button>
+            <button id="add-cylinder"><span class="icon icon-cyl"></span>Cylinder</button>
+            <button id="add-light"><span class="icon icon-light"></span>Light</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Scene</h2>
+          <ul id="entity-list"></ul>
+        </section>
+
+        <section>
+          <h2>Inspector</h2>
+          <div id="inspector"></div>
+        </section>
+
+        <section>
+          <h2>Render</h2>
+          <div id="settings"></div>
+        </section>
+
+        <section class="file-actions">
+          <button id="save-png">Save image</button>
+          <button id="export">Export scene</button>
+          <button id="import">Import scene</button>
+          <input id="import-file" type="file" accept="application/json,.json" hidden />
+        </section>
+      </aside>
+    </div>
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>

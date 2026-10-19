@@ -1,0 +1,9 @@
+{
+  "name": "lumen-path-tracer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interactive WebGL2 path tracer",
+  "scripts": {
+    "start": "npx http-server -c-1 -p 8080 ."
+  }
+}
