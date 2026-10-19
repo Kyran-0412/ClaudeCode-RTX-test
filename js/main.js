@@ -228,7 +228,7 @@ function updateHint() {
   hint.classList.remove('transforming');
   hint.innerHTML = app.selected
     ? `${k('G')} move · ${k('R')} rotate · ${k('S')} scale · ${k('.')} center view · ${k('Shift')}+${k('D')} duplicate · ${k('Del')} delete · ${k('Shift')}+${k('A')} add`
-    : `Click: select · ${k('Shift')}+${k('A')} add · Drag: orbit · Right-drag: pan · Wheel: zoom`;
+    : `Click: select · ${k('Shift')}+${k('A')} add · ${k('1')} ${k('2')} ${k('3')} view · Drag: orbit · Right-drag: pan · Wheel: zoom`;
 }
 
 // ---------------------------------------------------------------- add menu
@@ -437,6 +437,8 @@ window.addEventListener('keydown', (ev) => {
     app.select(null);
   } else if (plain && key === 'f') {
     app.focusOnSelected();
+  } else if (plain && !ev.shiftKey && ['1', '2', '3'].includes(ev.key)) {
+    setViewMode(VIEW_MODES[Number(ev.key) - 1]);
   } else if (plain && (ev.key === '.' || ev.code === 'NumpadDecimal')) {
     ev.preventDefault();
     centerViewOnSelected();
@@ -472,6 +474,29 @@ const TRANSFORM_KEYS = { g: 'grab', r: 'rotate', s: 'scale' };
 
 updateHint();
 
+// ---------------------------------------------------------------- view modes
+// 'wire' (lines only), 'solid' (grey shapes, instant) or 'render' (path traced).
+const VIEW_KEY = 'lumen-view-mode';
+const VIEW_MODES = ['wire', 'solid', 'render'];
+const WIRE_BG = [0.075, 0.08, 0.095];
+const viewButtons = document.querySelectorAll('#view-modes button');
+let viewMode = 'render';
+try {
+  const saved = localStorage.getItem(VIEW_KEY);
+  if (VIEW_MODES.includes(saved)) viewMode = saved;
+} catch { /* storage unavailable */ }
+
+function setViewMode(mode) {
+  viewMode = mode;
+  try { localStorage.setItem(VIEW_KEY, mode); } catch { /* storage unavailable */ }
+  viewButtons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+  renderer.reset();
+  app.displayDirty = true;
+  app.overlayDirty = true;
+}
+viewButtons.forEach((b) => b.addEventListener('click', () => setViewMode(b.dataset.mode)));
+setViewMode(viewMode);
+
 // ---------------------------------------------------------------- render loop
 let rateSamples = 0;
 let rateTime = performance.now();
@@ -500,24 +525,46 @@ function frame(now) {
     app.sceneDirty = false;
   }
 
-  if (renderer.frame < settings.sampleLimit) {
-    // While interacting, render a single sample per frame to stay responsive.
-    const spp = drag ? 1 : Math.min(settings.sppPerFrame, settings.sampleLimit - renderer.frame);
-    for (let i = 0; i < spp; i++) renderer.renderSample(basis, settings);
-    rateSamples += spp;
-    app.displayDirty = true;
-  }
-
-  if (app.displayDirty) {
-    renderer.present(settings.exposure);
+  if (viewMode === 'render') {
+    if (renderer.frame < settings.sampleLimit) {
+      // While interacting, render a single sample per frame to stay responsive.
+      const spp = drag ? 1 : Math.min(settings.sppPerFrame, settings.sampleLimit - renderer.frame);
+      for (let i = 0; i < spp; i++) renderer.renderSample(basis, settings);
+      rateSamples += spp;
+      app.displayDirty = true;
+    }
+    if (app.displayDirty) {
+      renderer.present(settings.exposure);
+      app.displayDirty = false;
+    }
+  } else if (viewMode === 'solid') {
+    // A handful of jittered samples is enough to anti-alias the edges.
+    if (renderer.frame < 8) {
+      renderer.renderSample(basis, settings, true);
+      app.displayDirty = true;
+    }
+    if (app.displayDirty) {
+      renderer.present(1, true);
+      app.displayDirty = false;
+    }
+  } else if (app.displayDirty) {
+    renderer.clearScreen(WIRE_BG);
     app.displayDirty = false;
   }
 
   if (app.overlayDirty) {
-    drawOverlay(overlay, basis, app.selected, { guides: tool.guides() });
+    drawOverlay(overlay, basis, app.selected, {
+      guides: tool.guides(),
+      wireframe: viewMode === 'wire' ? { entities: app.scene.entities } : null,
+    });
     app.overlayDirty = false;
   }
 
+  if (viewMode !== 'render') {
+    statRate.textContent = '';
+    statSamples.textContent = viewMode === 'solid' ? 'Solid preview' : `Wireframe · ${app.scene.entities.length} items`;
+    return;
+  }
   if (now - rateTime > 500) {
     const rate = (rateSamples * 1000) / (now - rateTime);
     statRate.textContent = renderer.frame >= settings.sampleLimit ? 'done' : `${rate.toFixed(1)} spp/s`;

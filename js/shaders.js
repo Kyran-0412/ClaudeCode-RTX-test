@@ -14,7 +14,9 @@ void main() {
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
-export const traceSrc = `#version 300 es
+// Shared by the path tracer and the solid preview: uniforms, RNG, scene
+// data access and ray intersection.
+const commonSrc = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
@@ -232,6 +234,9 @@ bool occluded(vec3 ro, vec3 rd, float tMax) {
   return false;
 }
 
+`;
+
+export const traceSrc = commonSrc + `
 // ---------------------------------------------------------------- environment
 vec3 skyColor(vec3 d) {
   if (d.y >= 0.0) return mix(uSkyHorizon, uSkyZenith, pow(d.y, 0.6));
@@ -504,6 +509,7 @@ precision highp float;
 precision highp sampler2D;
 uniform sampler2D uAccum;
 uniform float uExposure;
+uniform bool uRaw; // preview images are already display-ready
 out vec4 outColor;
 
 // ACES filmic approximation (Narkowicz 2015).
@@ -514,6 +520,35 @@ vec3 toSRGB(vec3 c) {
   return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
 }
 void main() {
-  vec3 c = texelFetch(uAccum, ivec2(gl_FragCoord.xy), 0).rgb * uExposure;
-  outColor = vec4(toSRGB(aces(c)), 1.0);
+  vec3 c = texelFetch(uAccum, ivec2(gl_FragCoord.xy), 0).rgb;
+  outColor = vec4(toSRGB(uRaw ? clamp(c, 0.0, 1.0) : aces(c * uExposure)), 1.0);
+}`;
+
+// Solid preview: one primary ray per pixel, plain grey surfaces lit by a
+// headlight and a fixed key light. No materials, shadows or bounces.
+export const previewSrc = commonSrc + `
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  gRng = pcgHash(uint(px.x) + pcgHash(uint(px.y) + pcgHash(uSeed)));
+  vec2 jitter = uFrame == 0 ? vec2(0.5) : vec2(rand(), rand());
+  vec2 ndc = ((gl_FragCoord.xy - 0.5 + jitter) / uResolution) * 2.0 - 1.0;
+  float aspect = uResolution.x / uResolution.y;
+  vec3 rd = normalize(uCamFwd + ndc.x * uTanHalfFov * aspect * uCamRight + ndc.y * uTanHalfFov * uCamUp);
+
+  vec3 n; int oid, lid;
+  traceScene(uCamPos, rd, n, oid, lid);
+  vec3 col;
+  if (oid < 0 && lid < 0) {
+    col = mix(vec3(0.050, 0.052, 0.058), vec3(0.16, 0.165, 0.18), clamp(ndc.y * 0.5 + 0.5, 0.0, 1.0));
+  } else if (lid >= 0) {
+    col = vec3(1.0, 0.82, 0.45);
+  } else {
+    vec3 N = dot(n, rd) < 0.0 ? n : -n;
+    float head = max(dot(N, -rd), 0.0);
+    float key = max(dot(N, normalize(vec3(0.45, 0.8, 0.4))), 0.0);
+    float hemi = 0.5 + 0.5 * N.y;
+    col = vec3(0.6) * (0.12 + 0.5 * head + 0.28 * key + 0.15 * hemi);
+  }
+  vec3 prev = texelFetch(uPrev, px, 0).rgb;
+  outColor = vec4(uFrame == 0 ? col : mix(prev, col, 1.0 / float(uFrame + 1)), 1.0);
 }`;

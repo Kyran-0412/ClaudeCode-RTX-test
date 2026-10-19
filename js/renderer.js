@@ -1,6 +1,6 @@
 // WebGL2 progressive path tracer.
 
-import { vertexSrc, traceSrc, displaySrc, MAX_LIGHTS, OBJ_TEXELS } from './shaders.js';
+import { vertexSrc, traceSrc, previewSrc, displaySrc, MAX_LIGHTS, OBJ_TEXELS } from './shaders.js';
 import { objectFrame, sunDirection, MATERIAL_TYPES, SHAPES } from './scene.js';
 import { hexToLinear, DEG } from './math.js';
 
@@ -20,6 +20,7 @@ export class Renderer {
     this.gl = gl;
     this.canvas = canvas;
     this.trace = this.createProgram(vertexSrc, traceSrc);
+    this.preview = this.createProgram(vertexSrc, previewSrc);
     this.display = this.createProgram(vertexSrc, displaySrc);
     this.vao = gl.createVertexArray();
 
@@ -150,10 +151,11 @@ export class Renderer {
     this.numLights = n;
   }
 
-  // Renders one sample per pixel into the accumulation buffer.
-  renderSample(basis, settings) {
+  // Renders one sample per pixel into the accumulation buffer, either path
+  // traced or (preview = true) as the flat solid view.
+  renderSample(basis, settings, preview = false) {
     const gl = this.gl;
-    const { program, locs } = this.trace;
+    const { program, locs } = preview ? this.preview : this.trace;
     const src = this.targets[this.frame % 2];
     const dst = this.targets[(this.frame + 1) % 2];
     gl.useProgram(program);
@@ -193,7 +195,7 @@ export class Renderer {
     this.frame++;
   }
 
-  present(exposure) {
+  present(exposure, raw = false) {
     const gl = this.gl;
     const { program, locs } = this.display;
     gl.useProgram(program);
@@ -204,6 +206,15 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.targets[this.frame % 2].tex);
     gl.uniform1i(locs.uAccum, 0);
     gl.uniform1f(locs.uExposure, exposure);
+    gl.uniform1i(locs.uRaw, raw ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  clearScreen([r, g, b]) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.clearColor(r, g, b, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
   }
 }

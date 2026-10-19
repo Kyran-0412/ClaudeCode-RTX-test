@@ -1,12 +1,58 @@
-// 2D overlay drawn on top of the render: selection outline and a drop line
-// to the ground so you can judge an object's height.
+// 2D overlay drawn on top of the viewport: the whole scene in wireframe
+// mode, the selection outline, transform guides, and a drop line to the
+// ground so you can judge an object's height.
 
-import { add, mulMatVec } from './math.js';
+import { add, sub, dot, mulMatVec } from './math.js';
 import { objectFrame } from './scene.js';
-import { project } from './camera.js';
 
 const ACCENT = '#ffb547';
+const WIRE = '#c3c8d2';
+const WIRE_LIGHT = '#d9cf8f';
+const GRID = '#343944';
+const GRID_X = '#a8484c'; // the line along X (z = 0)
+const GRID_Z = '#4a6eb0'; // the line along Z (x = 0)
+const NEAR = 0.05;
 
+// ---------------------------------------------------------------- projection
+// Lines are clipped against the camera's near plane in camera space, so edges
+// that pass behind the camera (big floors, walls) still draw correctly.
+function makeProjector(basis, w, h) {
+  const aspect = w / h;
+  const toCam = (p) => {
+    const d = sub(p, basis.pos);
+    return [dot(d, basis.right), dot(d, basis.up), dot(d, basis.fwd)];
+  };
+  const toScreen = ([x, y, z]) => [
+    ((x / (z * basis.tanHalf * aspect) + 1) / 2) * w,
+    ((1 - y / (z * basis.tanHalf)) / 2) * h,
+  ];
+  return { toCam, toScreen };
+}
+
+function strokePolyline(ctx, proj, points) {
+  ctx.beginPath();
+  let last = null; // last screen point drawn
+  for (let i = 0; i + 1 < points.length; i++) {
+    let a = proj.toCam(points[i]);
+    let b = proj.toCam(points[i + 1]);
+    if (a[2] < NEAR && b[2] < NEAR) { last = null; continue; }
+    if (a[2] < NEAR) a = lerpToNear(a, b);
+    else if (b[2] < NEAR) b = lerpToNear(b, a);
+    const sa = proj.toScreen(a), sb = proj.toScreen(b);
+    if (!last || Math.abs(last[0] - sa[0]) > 0.01 || Math.abs(last[1] - sa[1]) > 0.01) ctx.moveTo(sa[0], sa[1]);
+    ctx.lineTo(sb[0], sb[1]);
+    last = sb;
+  }
+  ctx.stroke();
+}
+
+// Moves camera-space point `p` (behind the near plane) toward `q` until z = NEAR.
+function lerpToNear(p, q) {
+  const t = (NEAR - p[2]) / (q[2] - p[2]);
+  return [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, NEAR];
+}
+
+// ---------------------------------------------------------------- shapes
 function ring(center, a, b, segments = 48) {
   const pts = [];
   for (let i = 0; i <= segments; i++) {
@@ -16,16 +62,28 @@ function ring(center, a, b, segments = 48) {
   return pts;
 }
 
-// Returns a list of world-space polylines outlining the entity.
-function outline(e) {
-  if (e.kind === 'light') {
-    const r = e.radius * 1.4;
-    return [
-      ring(e.position, [r, 0, 0], [0, 0, r]),
-      ring(e.position, [r, 0, 0], [0, r, 0]),
-      ring(e.position, [0, 0, r], [0, r, 0]),
-    ];
+function boxEdges() {
+  const edges = [];
+  for (const s of [-1, 1]) {
+    for (const t of [-1, 1]) {
+      edges.push([[-1, s, t], [1, s, t]], [[s, -1, t], [s, 1, t]], [[s, t, -1], [s, t, 1]]);
+    }
   }
+  return edges;
+}
+
+function lightRings(e, scaleBy = 1) {
+  const r = e.radius * scaleBy;
+  return [
+    ring(e.position, [r, 0, 0], [0, 0, r]),
+    ring(e.position, [r, 0, 0], [0, r, 0]),
+    ring(e.position, [0, 0, r], [0, r, 0]),
+  ];
+}
+
+// Minimal outline used to highlight the selection.
+function outline(e) {
+  if (e.kind === 'light') return lightRings(e, 1.4);
   const { M } = objectFrame(e);
   const toWorld = (l) => add(e.position, mulMatVec(M, l));
   if (e.shape === 'sphere') {
@@ -40,17 +98,64 @@ function outline(e) {
     for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) lines.push([[x, -1, z], [x, 1, z]]);
     return lines.map((r) => r.map(toWorld));
   }
-  const c = (x, y, z) => [x, y, z];
-  const edges = [];
-  for (const s of [-1, 1]) {
-    for (const t of [-1, 1]) {
-      edges.push([c(-1, s, t), c(1, s, t)], [c(s, -1, t), c(s, 1, t)], [c(s, t, -1), c(s, t, 1)]);
-    }
-  }
-  return edges.map((r) => r.map(toWorld));
+  return boxEdges().map((r) => r.map(toWorld));
 }
 
-export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides = null } = {}) {
+// Denser mesh-like wireframe used in wireframe view.
+function wire(e) {
+  if (e.kind === 'light') {
+    const lines = lightRings(e);
+    const r = e.radius;
+    for (const d of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      lines.push([add(e.position, d.map((v) => v * r * 1.3)), add(e.position, d.map((v) => v * r * 2.2))]);
+    }
+    return lines;
+  }
+  const { M } = objectFrame(e);
+  const toWorld = (l) => add(e.position, mulMatVec(M, l));
+  const lines = [];
+  if (e.shape === 'sphere') {
+    for (const lat of [-60, -30, 0, 30, 60]) {
+      const a = (lat * Math.PI) / 180, r = Math.cos(a), y = Math.sin(a);
+      lines.push(ring([0, y, 0], [r, 0, 0], [0, 0, r], 40));
+    }
+    for (let i = 0; i < 6; i++) {
+      const t = (i / 6) * Math.PI;
+      lines.push(ring([0, 0, 0], [Math.cos(t), 0, Math.sin(t)], [0, 1, 0], 40));
+    }
+  } else if (e.shape === 'cylinder') {
+    lines.push(ring([0, 1, 0], [1, 0, 0], [0, 0, 1]), ring([0, -1, 0], [1, 0, 0], [0, 0, 1]));
+    for (let i = 0; i < 12; i++) {
+      const t = (i / 12) * Math.PI * 2;
+      lines.push([[Math.cos(t), -1, Math.sin(t)], [Math.cos(t), 1, Math.sin(t)]]);
+    }
+  } else {
+    lines.push(...boxEdges());
+  }
+  return lines.map((r) => r.map(toWorld));
+}
+
+function drawGrid(ctx, proj) {
+  const N = 20;
+  ctx.lineWidth = 1;
+  for (let i = -N; i <= N; i++) {
+    if (i === 0) continue;
+    ctx.strokeStyle = GRID;
+    ctx.globalAlpha = i % 5 === 0 ? 0.9 : 0.5;
+    strokePolyline(ctx, proj, [[i, 0, -N], [i, 0, N]]);
+    strokePolyline(ctx, proj, [[-N, 0, i], [N, 0, i]]);
+  }
+  ctx.globalAlpha = 0.9;
+  ctx.strokeStyle = GRID_X;
+  strokePolyline(ctx, proj, [[-N, 0, 0], [N, 0, 0]]);
+  ctx.strokeStyle = GRID_Z;
+  strokePolyline(ctx, proj, [[0, 0, -N], [0, 0, N]]);
+  ctx.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------- main entry
+// options.wireframe: { entities } draws the whole scene as lines.
+export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides = null, wireframe = null } = {}) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
@@ -60,38 +165,39 @@ export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
+  const proj = makeProjector(basis, w, h);
+
+  if (wireframe) {
+    drawGrid(ctx, proj);
+    ctx.lineWidth = 1;
+    for (const e of wireframe.entities) {
+      if (e === entity) continue;
+      ctx.strokeStyle = e.kind === 'light' ? WIRE_LIGHT : WIRE;
+      ctx.globalAlpha = 0.75;
+      for (const line of wire(e)) strokePolyline(ctx, proj, line);
+    }
+    ctx.globalAlpha = 1;
+  }
   if (!entity) return;
 
-  if (guides) drawGuides(ctx, basis, guides, w, h);
+  if (guides) drawGuides(ctx, proj, guides);
 
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = ACCENT;
-  ctx.globalAlpha = 0.9;
-  for (const line of outline(entity)) {
-    ctx.beginPath();
-    let pen = false;
-    for (const p of line) {
-      const s = project(basis, p, w, h);
-      if (!s) { pen = false; continue; }
-      if (pen) ctx.lineTo(s[0], s[1]);
-      else { ctx.moveTo(s[0], s[1]); pen = true; }
-    }
-    ctx.stroke();
-  }
+  ctx.globalAlpha = 0.95;
+  for (const line of wireframe ? wire(entity) : outline(entity)) strokePolyline(ctx, proj, line);
 
   if (showDropLine) {
-    const top = project(basis, entity.position, w, h);
-    const ground = project(basis, [entity.position[0], 0, entity.position[2]], w, h);
-    if (top && ground) {
+    const top = proj.toCam(entity.position);
+    const ground = proj.toCam([entity.position[0], 0, entity.position[2]]);
+    if (top[2] > NEAR && ground[2] > NEAR) {
       ctx.setLineDash([4, 4]);
       ctx.globalAlpha = 0.6;
-      ctx.beginPath();
-      ctx.moveTo(top[0], top[1]);
-      ctx.lineTo(ground[0], ground[1]);
-      ctx.stroke();
+      strokePolyline(ctx, proj, [entity.position, [entity.position[0], 0, entity.position[2]]]);
       ctx.setLineDash([]);
+      const g = proj.toScreen(ground);
       ctx.beginPath();
-      ctx.arc(ground[0], ground[1], 3, 0, Math.PI * 2);
+      ctx.arc(g[0], g[1], 3, 0, Math.PI * 2);
       ctx.fillStyle = ACCENT;
       ctx.fill();
     }
@@ -101,21 +207,17 @@ export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides
 
 // Constraint axes through the object, plus a dashed line from the object to
 // the cursor while rotating or scaling.
-function drawGuides(ctx, basis, guides, w, h) {
+function drawGuides(ctx, proj, guides) {
   ctx.lineWidth = 1.5;
   for (const { dir, color } of guides.axes) {
     ctx.strokeStyle = color;
     ctx.globalAlpha = 0.85;
-    ctx.beginPath();
-    let pen = false;
-    for (let i = -200; i <= 200; i++) {
-      const t = Math.sign(i) * (i * i) / 400; // denser near the object
-      const s = project(basis, add(guides.origin, dir.map((v) => v * t)), w, h);
-      if (!s) { pen = false; continue; }
-      if (pen) ctx.lineTo(s[0], s[1]);
-      else { ctx.moveTo(s[0], s[1]); pen = true; }
-    }
-    ctx.stroke();
+    const far = 1000;
+    strokePolyline(ctx, proj, [
+      add(guides.origin, dir.map((v) => -v * far)),
+      guides.origin,
+      add(guides.origin, dir.map((v) => v * far)),
+    ]);
   }
   if (guides.line) {
     const [a, b] = guides.line;

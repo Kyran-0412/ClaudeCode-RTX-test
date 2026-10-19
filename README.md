@@ -38,12 +38,17 @@ Shortcuts work like Blender's: select first, then transform with the keyboard.
 | Delete | <kbd>Delete</kbd> / <kbd>Backspace</kbd> |
 | Focus depth of field on selection | <kbd>F</kbd> |
 | Orbit around the selection | <kbd>.</kbd> (period, or numpad <kbd>.</kbd>) moves the camera's pivot to the selected object |
+| Switch view | <kbd>1</kbd> Wireframe · <kbd>2</kbd> Solid · <kbd>3</kbd> Rendered (or the buttons top-right) |
 | Orbit camera | Drag |
 | Pan | Right-drag (or <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + drag) |
 | Zoom | Mouse wheel / pinch |
 
 Move and rotate use world axes; scale uses the object's own axes (so a rotated
 box stretches along its own length). Spheres and lights always scale evenly.
+
+**Views.** *Wireframe* draws every object as lines over a ground grid (red line =
+X axis, blue = Z). *Solid* shows plain grey shapes with no materials, and it updates
+instantly, which suits laying out a scene. *Rendered* is the full path tracer.
 
 The side panel lets you add spheres, boxes, cylinders and lights, edit position,
 rotation, size and material, and tweak the sky, sun, camera lens and quality
