@@ -227,7 +227,7 @@ function updateHint() {
   }
   hint.classList.remove('transforming');
   hint.innerHTML = app.selected
-    ? `${k('G')} move · ${k('R')} rotate · ${k('S')} scale · ${k('Shift')}+${k('D')} duplicate · ${k('Del')} delete · ${k('Shift')}+${k('A')} add`
+    ? `${k('G')} move · ${k('R')} rotate · ${k('S')} scale · ${k('.')} center view · ${k('Shift')}+${k('D')} duplicate · ${k('Del')} delete · ${k('Shift')}+${k('A')} add`
     : `Click: select · ${k('Shift')}+${k('A')} add · Drag: orbit · Right-drag: pan · Wheel: zoom`;
 }
 
@@ -437,8 +437,32 @@ window.addEventListener('keydown', (ev) => {
     app.select(null);
   } else if (plain && key === 'f') {
     app.focusOnSelected();
+  } else if (plain && (ev.key === '.' || ev.code === 'NumpadDecimal')) {
+    ev.preventDefault();
+    centerViewOnSelected();
   }
 });
+
+// Moves the camera's orbit pivot to the selected object, gliding over ~0.3 s.
+// The camera keeps its angle and distance, so the view slides across.
+let pivotAnim = 0;
+function centerViewOnSelected() {
+  const e = app.selected;
+  if (!e) return;
+  const cam = app.scene.camera;
+  const from = cam.target.slice();
+  const to = e.position.slice();
+  const t0 = performance.now();
+  cancelAnimationFrame(pivotAnim);
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / 300);
+    const ease = 1 - Math.pow(1 - t, 3);
+    cam.target = from.map((v, i) => v + (to[i] - v) * ease);
+    app.markDirty();
+    if (t < 1) pivotAnim = requestAnimationFrame(step);
+  };
+  pivotAnim = requestAnimationFrame(step);
+}
 
 window.addEventListener('keyup', (ev) => {
   if (tool.active && (ev.key === 'Control' || ev.key === 'Meta')) tool.setSnap(false);

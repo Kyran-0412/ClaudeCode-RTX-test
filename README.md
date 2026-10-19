@@ -37,6 +37,7 @@ Shortcuts work like Blender's: select first, then transform with the keyboard.
 | Duplicate and move | <kbd>Shift</kbd>+<kbd>D</kbd> (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>D</kbd> duplicates in place, offset) |
 | Delete | <kbd>Delete</kbd> / <kbd>Backspace</kbd> |
 | Focus depth of field on selection | <kbd>F</kbd> |
+| Orbit around the selection | <kbd>.</kbd> (period, or numpad <kbd>.</kbd>) moves the camera's pivot to the selected object |
 | Orbit camera | Drag |
 | Pan | Right-drag (or <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + drag) |
 | Zoom | Mouse wheel / pinch |
