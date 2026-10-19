@@ -1,6 +1,7 @@
 // Side panel: add buttons, scene list, inspector and render settings.
 
 import { MATERIAL_PRESETS, MATERIAL_TYPES, PRESETS, makeDefault } from './scene.js';
+import { SELECT_MODES, SELECT_MODE_NAMES } from './editmode.js';
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -146,6 +147,10 @@ export class UI {
       this.inspectorEl.replaceChildren(h('p', { class: 'muted', text: 'Click an object in the view or the list to edit it.' }));
       return;
     }
+    if (app.edit.active) {
+      this.renderEditPanel();
+      return;
+    }
     const changed = () => app.markDirty();
     const changedList = () => { app.markDirty(); this.renderList(); };
     const rows = [];
@@ -165,6 +170,9 @@ export class UI {
         rows.push(sliderRow('Radius', e.radius, { min: 0.05, max: 5, step: 0.05 }, (v) => { e.radius = v; changed(); }));
       } else if (e.shape === 'box') {
         rows.push(vec3Row('Size', e.size, 0.1, () => { e.size = e.size.map((s) => Math.max(0.01, s)); changed(); }));
+      } else if (e.shape === 'mesh') {
+        rows.push(vec3Row('Scale', e.scale, 0.1, () => { e.scale = e.scale.map((s) => (Math.abs(s) < 0.001 ? 0.001 : s)); changed(); }));
+        rows.push(h('p', { class: 'muted small', text: `Mesh · ${e.mesh.vertices.length} vertices · ${e.mesh.faces.length} faces` }));
       } else {
         rows.push(sliderRow('Radius', e.radius, { min: 0.05, max: 5, step: 0.05 }, (v) => { e.radius = v; changed(); }));
         rows.push(sliderRow('Height', e.height, { min: 0.05, max: 10, step: 0.05 }, (v) => { e.height = v; changed(); }));
@@ -207,7 +215,13 @@ export class UI {
       h(
         'div',
         { class: 'button-row' },
-        h('button', { text: 'Focus here', title: 'Set depth-of-field focus to this object (F)', onclick: () => app.focusOnSelected() }),
+        e.kind === 'object' &&
+          h('button', {
+            text: 'Edit mesh',
+            title: e.shape === 'mesh' ? 'Edit vertices and faces (Tab)' : 'Turns this shape into an editable mesh (Tab)',
+            onclick: () => app.enterEdit(),
+          }),
+        h('button', { text: 'Focus', title: 'Set depth-of-field focus to this object (F)', onclick: () => app.focusOnSelected() }),
         h('button', { text: 'Duplicate', title: 'Ctrl/Cmd + D', onclick: () => app.duplicateSelected() }),
         h('button', { class: 'danger', text: 'Delete', title: 'Delete / Backspace', onclick: () => app.deleteSelected() }),
       ),
@@ -215,8 +229,62 @@ export class UI {
     this.inspectorEl.replaceChildren(...rows);
   }
 
+  // Inspector while editing a mesh: select mode, selection centre, actions.
+  renderEditPanel() {
+    const app = this.app;
+    const edit = app.edit;
+    const e = edit.entity;
+    this.positionInputs = [];
+    const rows = [h('p', { class: 'edit-title' }, h('strong', { text: e.name }), ' · edit mode')];
+
+    rows.push(
+      h(
+        'div',
+        { class: 'segmented', role: 'group', 'aria-label': 'Select mode' },
+        SELECT_MODES.map((m, i) =>
+          h('button', {
+            text: SELECT_MODE_NAMES[m],
+            title: `${SELECT_MODE_NAMES[m]} select (${i + 1})`,
+            'aria-pressed': String(edit.mode === m),
+            onclick: () => app.setSelectMode(m),
+          }),
+        ),
+      ),
+    );
+
+    const n = edit.count();
+    const noun = { vert: 'vertex', edge: 'edge', face: 'face' }[edit.mode];
+    const plural = { vert: 'vertices', edge: 'edges', face: 'faces' }[edit.mode];
+    rows.push(h('p', { class: 'muted small', text: `${n} ${n === 1 ? noun : plural} selected · mesh has ${e.mesh.vertices.length} vertices, ${e.mesh.faces.length} faces` }));
+
+    const median = edit.median();
+    if (median) {
+      const values = median.slice();
+      rows.push(vec3Row('Median', values, 0.1, () => { edit.setMedian(values); app.markDirty(); }, this.positionInputs));
+    }
+
+    rows.push(
+      checkRow('Smooth shading', e.mesh.smooth !== false, (v) => { e.mesh.smooth = v; app.markDirty(); }),
+    );
+    rows.push(
+      h(
+        'div',
+        { class: 'button-row' },
+        h('button', { text: 'Select all', title: 'A', onclick: () => { edit.selectAll(); app.editSelectionChanged(); } }),
+        h('button', { class: 'danger', text: 'Delete', title: 'Delete / X', disabled: !n, onclick: () => app.deleteSelected() }),
+        h('button', { text: 'Done', title: 'Tab', onclick: () => app.exitEdit() }),
+      ),
+    );
+    this.inspectorEl.replaceChildren(...rows);
+  }
+
   // Called while dragging so the numbers follow the object.
   syncPosition() {
+    if (this.app.edit.active) {
+      const m = this.app.edit.median();
+      if (m) this.positionInputs.forEach((input, i) => { if (document.activeElement !== input) input.value = fmt(m[i], 0.1); });
+      return;
+    }
     const e = this.app.selected;
     if (!e) return;
     this.positionInputs.forEach((input, i) => {

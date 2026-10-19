@@ -6,6 +6,10 @@
 export const MAX_LIGHTS = 16;
 // Texels per object row in the object data texture (see Renderer.uploadScene).
 export const OBJ_TEXELS = 6;
+// Mesh triangles: 6 texels each (3 positions, 3 normals), TRIS_PER_ROW per row.
+export const TRIS_PER_ROW = 256;
+// BVH nodes: 2 texels each, NODES_PER_ROW per row.
+export const NODES_PER_ROW = 1024;
 
 export const vertexSrc = `#version 300 es
 void main() {
@@ -34,9 +38,16 @@ precision highp sampler2D;
 #define M_METAL 2
 #define M_GLASS 3
 
+#define TRIS_PER_ROW ${TRIS_PER_ROW}
+#define NODES_PER_ROW ${NODES_PER_ROW}
+#define SHAPE_MESH 3
+
 uniform sampler2D uPrev;
 uniform sampler2D uObjects;
 uniform int uNumObjects;
+uniform sampler2D uTris;
+uniform sampler2D uBVH;
+uniform int uNumTris;
 uniform int uNumLights;
 // Sphere light: A = (center, radius),       B = (radiance, 0)
 // Sun light:    A = (direction, 1-cos(max)), B = (radiance, 1)
@@ -206,13 +217,97 @@ float hitSphereWorld(vec3 c, float r, vec3 ro, vec3 rd) {
   return t > EPS ? t : INF;
 }
 
+// ---------------------------------------------------------------- meshes
+vec4 triTexel(int tri, int k) {
+  return texelFetch(uTris, ivec2((tri % TRIS_PER_ROW) * 6 + k, tri / TRIS_PER_ROW), 0);
+}
+
+void bvhNode(int i, out vec4 a, out vec4 b) {
+  ivec2 c = ivec2((i % NODES_PER_ROW) * 2, i / NODES_PER_ROW);
+  a = texelFetch(uBVH, c, 0);
+  b = texelFetch(uBVH, c + ivec2(1, 0), 0);
+}
+
+float boxEntry(vec3 bmin, vec3 bmax, vec3 ro, vec3 invD) {
+  vec3 t0 = (bmin - ro) * invD, t1 = (bmax - ro) * invD;
+  vec3 tn = min(t0, t1), tf = max(t0, t1);
+  float a = max(max(tn.x, tn.y), tn.z);
+  float b = min(min(tf.x, tf.y), tf.z);
+  return b >= max(a, 0.0) ? max(a, 0.0) : INF;
+}
+
+// Walks the triangle BVH. Returns the closest hit before tMax (or, with
+// anyHit, the first one found), plus the triangle and its barycentrics.
+float traceTris(vec3 ro, vec3 rd, float tMax, bool anyHit, out int triId, out vec2 bary) {
+  triId = -1;
+  bary = vec2(0.0);
+  if (uNumTris == 0) return INF;
+  vec3 dd = vec3(abs(rd.x) < 1e-9 ? 1e-9 : rd.x, abs(rd.y) < 1e-9 ? 1e-9 : rd.y, abs(rd.z) < 1e-9 ? 1e-9 : rd.z);
+  vec3 invD = 1.0 / dd;
+  int stack[32];
+  int sp = 0;
+  stack[sp++] = 0;
+  float best = tMax;
+  for (int it = 0; it < 4096 && sp > 0; it++) {
+    int ni = stack[--sp];
+    vec4 a, b;
+    bvhNode(ni, a, b);
+    if (boxEntry(a.xyz, b.xyz, ro, invD) >= best) continue;
+    int count = int(b.w + 0.5);
+    if (count > 0) {
+      int first = int(a.w + 0.5);
+      for (int k = 0; k < count; k++) {
+        int ti = first + k;
+        vec3 v0 = triTexel(ti, 0).xyz, v1 = triTexel(ti, 1).xyz, v2 = triTexel(ti, 2).xyz;
+        vec3 e1 = v1 - v0, e2 = v2 - v0;
+        vec3 p = cross(rd, e2);
+        float det = dot(e1, p);
+        if (abs(det) < 1e-12) continue;
+        float id = 1.0 / det;
+        vec3 s = ro - v0;
+        float u = dot(s, p) * id;
+        if (u < 0.0 || u > 1.0) continue;
+        vec3 q = cross(s, e1);
+        float v = dot(rd, q) * id;
+        if (v < 0.0 || u + v > 1.0) continue;
+        float t = dot(e2, q) * id;
+        if (t > EPS && t < best) {
+          best = t; triId = ti; bary = vec2(u, v);
+          if (anyHit) return best;
+        }
+      }
+    } else if (sp < 30) {
+      int l = ni + 1, r = int(a.w + 0.5);
+      vec4 la, lb, ra, rb;
+      bvhNode(l, la, lb);
+      bvhNode(r, ra, rb);
+      float dl = boxEntry(la.xyz, lb.xyz, ro, invD);
+      float dr = boxEntry(ra.xyz, rb.xyz, ro, invD);
+      // Push the farther child first so the nearer one is visited next.
+      if (dl <= dr) {
+        if (dr < best) stack[sp++] = r;
+        if (dl < best) stack[sp++] = l;
+      } else {
+        if (dl < best) stack[sp++] = l;
+        if (dr < best) stack[sp++] = r;
+      }
+    }
+  }
+  return triId >= 0 ? best : INF;
+}
+
+// Interpolated (smooth) normal of the last surface hit by traceScene.
+vec3 gShadeN;
+
 float traceScene(vec3 ro, vec3 rd, out vec3 n, out int objId, out int lightId) {
   float tBest = INF;
   n = vec3(0.0, 1.0, 0.0);
   objId = -1; lightId = -1;
   for (int i = 0; i < uNumObjects; i++) {
+    Obj ob = getObj(i);
+    if (ob.shape == SHAPE_MESH) continue;
     vec3 nn;
-    float t = intersectObj(getObj(i), ro, rd, nn);
+    float t = intersectObj(ob, ro, rd, nn);
     if (t < tBest) { tBest = t; n = nn; objId = i; }
   }
   for (int k = 0; k < uNumLights; k++) {
@@ -223,15 +318,31 @@ float traceScene(vec3 ro, vec3 rd, out vec3 n, out int objId, out int lightId) {
       lightId = k; objId = -1;
     }
   }
+  gShadeN = n;
+  int ti; vec2 bc;
+  float tt = traceTris(ro, rd, tBest, false, ti, bc);
+  if (tt < tBest) {
+    tBest = tt;
+    vec4 v0 = triTexel(ti, 0);
+    vec3 v1 = triTexel(ti, 1).xyz, v2 = triTexel(ti, 2).xyz;
+    n = normalize(cross(v1 - v0.xyz, v2 - v0.xyz));
+    objId = int(v0.w + 0.5);
+    lightId = -1;
+    vec3 sn = triTexel(ti, 3).xyz * (1.0 - bc.x - bc.y) + triTexel(ti, 4).xyz * bc.x + triTexel(ti, 5).xyz * bc.y;
+    gShadeN = dot(sn, sn) > 1e-12 ? normalize(sn) : n;
+  }
   return tBest;
 }
 
 bool occluded(vec3 ro, vec3 rd, float tMax) {
   for (int i = 0; i < uNumObjects; i++) {
+    Obj ob = getObj(i);
+    if (ob.shape == SHAPE_MESH) continue;
     vec3 nn;
-    if (intersectObj(getObj(i), ro, rd, nn) < tMax) return true;
+    if (intersectObj(ob, ro, rd, nn) < tMax) return true;
   }
-  return false;
+  int ti; vec2 bc;
+  return traceTris(ro, rd, tMax, true, ti, bc) < tMax;
 }
 
 `;
@@ -424,8 +535,12 @@ vec3 trace(vec3 ro, vec3 rd) {
     vec3 P = ro + rd * t;
     Mat m = getMat(oid);
     bool front = dot(rd, n) < 0.0;
-    vec3 Ns = front ? n : -n;
+    vec3 Ns = front ? n : -n; // geometric normal, facing the incoming ray
     vec3 V = -rd;
+    // Smooth shading normal on the same side; falls back to the geometric one
+    // where interpolation would make the surface face away from the viewer.
+    vec3 Nsh = dot(gShadeN, Ns) < 0.0 ? -gShadeN : gShadeN;
+    if (dot(Nsh, V) <= 1e-4) Nsh = Ns;
 
     // Beer-Lambert absorption while travelling inside tinted glass.
     if (m.type == M_GLASS && !front) thr *= pow(max(m.color, vec3(1e-4)), vec3(t));
@@ -440,7 +555,7 @@ vec3 trace(vec3 ro, vec3 rd) {
       vec3 Ld, Le; float lpdf, dist;
       if (sampleLight(P, Ld, lpdf, dist, Le) && dot(Ld, Ns) > 0.0) {
         float bpdf;
-        vec3 f = evalBSDF(m, Ns, V, Ld, bpdf);
+        vec3 f = evalBSDF(m, Nsh, V, Ld, bpdf);
         if (bpdf > 0.0 && !occluded(P + Ns * EPS, Ld, dist - 2.0 * EPS)) {
           radiance += thr * f * Le * (powerHeuristic(lpdf, bpdf) / lpdf);
         }
@@ -450,12 +565,12 @@ vec3 trace(vec3 ro, vec3 rd) {
     vec3 L;
     float pdf;
     if (delta) {
-      L = sampleGlass(m, Ns, V, front);
+      L = sampleGlass(m, Nsh, V, front);
       pdf = 1.0;
     } else {
-      L = sampleBSDFDir(m, Ns, V);
+      L = sampleBSDFDir(m, Nsh, V);
       if (dot(L, Ns) <= 0.0) break;
-      vec3 f = evalBSDF(m, Ns, V, L, pdf);
+      vec3 f = evalBSDF(m, Nsh, V, L, pdf);
       if (pdf <= 1e-8) break;
       thr *= f / pdf;
     }
@@ -543,7 +658,7 @@ void main() {
   } else if (lid >= 0) {
     col = vec3(1.0, 0.82, 0.45);
   } else {
-    vec3 N = dot(n, rd) < 0.0 ? n : -n;
+    vec3 N = dot(gShadeN, rd) < 0.0 ? gShadeN : -gShadeN;
     float head = max(dot(N, -rd), 0.0);
     float key = max(dot(N, normalize(vec3(0.45, 0.8, 0.4))), 0.0);
     float hemi = 0.5 + 0.5 * N.y;

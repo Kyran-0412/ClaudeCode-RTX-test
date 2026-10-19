@@ -2,6 +2,7 @@
 
 import { sub, dot, mulMatVec } from './math.js';
 import { objectFrame } from './scene.js';
+import { localAccel, raycastBVH } from './mesh.js';
 
 function hitSphere(o, d) {
   const a = dot(d, d), b = dot(o, d), c = dot(o, o) - 1;
@@ -66,6 +67,11 @@ export function intersectEntity(e, ro, rd) {
   const d = mulMatVec(inv, rd);
   if (e.shape === 'sphere') return hitSphere(o, d);
   if (e.shape === 'box') return hitBox(o, d);
+  if (e.shape === 'mesh') {
+    const acc = localAccel(e.mesh);
+    const hit = raycastBVH(acc.bvh, acc.tv, o, d);
+    return hit ? hit.t : Infinity;
+  }
   return hitCylinder(o, d);
 }
 

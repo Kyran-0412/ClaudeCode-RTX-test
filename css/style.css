@@ -66,7 +66,23 @@ html, body {
   border-radius: 6px;
   backdrop-filter: blur(6px);
 }
-#hud span:empty { display: none; }
+#hud span:empty, #hud span[hidden] { display: none; }
+#hud .mode-badge { background: #2b2516; color: var(--accent); border: 1px solid #6b5124; }
+
+#toast {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+#toast[hidden] { display: none; }
 
 #view-modes {
   position: absolute;
@@ -214,6 +230,13 @@ h3 {
   font-weight: 600;
 }
 .muted { color: var(--muted); margin: 0; }
+.small { font-size: 12px; margin: 0 0 8px; }
+.edit-title { margin: 0 0 10px; color: var(--muted); }
+.edit-title strong { color: var(--text); }
+.segmented { display: flex; gap: 2px; padding: 2px; margin-bottom: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; }
+.segmented button { flex: 1; border: 1px solid transparent; background: none; padding: 5px 6px; }
+.segmented button[aria-pressed='true'] { background: #2b2516; border-color: #6b5124; color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
 
 button, select, input[type='text'], input[type='number'] {
   font: inherit;
@@ -335,6 +358,7 @@ input[type='range'] { accent-color: var(--accent); width: 100%; min-width: 0; }
 }
 
 .button-row {
+  flex-wrap: wrap;
   display: flex;
   gap: 6px;
   margin-top: 12px;

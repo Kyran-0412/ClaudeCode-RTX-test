@@ -1,8 +1,9 @@
 // WebGL2 progressive path tracer.
 
-import { vertexSrc, traceSrc, previewSrc, displaySrc, MAX_LIGHTS, OBJ_TEXELS } from './shaders.js';
+import { vertexSrc, traceSrc, previewSrc, displaySrc, MAX_LIGHTS, OBJ_TEXELS, TRIS_PER_ROW, NODES_PER_ROW } from './shaders.js';
 import { objectFrame, sunDirection, MATERIAL_TYPES, SHAPES } from './scene.js';
-import { hexToLinear, DEG } from './math.js';
+import { hexToLinear, DEG, mulMatVec, add, normalize } from './math.js';
+import { cornerNormals, triangulate, buildBVH } from './mesh.js';
 
 export class Renderer {
   constructor(canvas) {
@@ -29,6 +30,18 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, OBJ_TEXELS, 1, 0, gl.RGBA, gl.FLOAT, new Float32Array(OBJ_TEXELS * 4));
+
+    const dataTex = () => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, new Float32Array(4));
+      return t;
+    };
+    this.triTex = dataTex();
+    this.bvhTex = dataTex();
+    this.numTris = 0;
 
     this.targets = [];
     this.width = 0;
@@ -124,6 +137,7 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.objTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, OBJ_TEXELS, Math.max(objects.length, 1), 0, gl.RGBA, gl.FLOAT, data);
     this.numObjects = objects.length;
+    this.uploadMeshes(objects);
 
     this.lightA.fill(0);
     this.lightB.fill(0);
@@ -151,6 +165,54 @@ export class Renderer {
     this.numLights = n;
   }
 
+  // World-space triangles of every mesh object, sorted into a BVH.
+  uploadMeshes(objects) {
+    const gl = this.gl;
+    const pos = [], nrm = [], owner = [];
+    objects.forEach((o, oi) => {
+      if (o.shape !== 'mesh' || !o.mesh) return;
+      const { M, inv } = objectFrame(o);
+      const toWorld = (v) => add(o.position, mulMatVec(M, v));
+      // Normals transform by the inverse transpose of M.
+      const nToWorld = (n) => normalize([0, 1, 2].map((k) => inv[0][k] * n[0] + inv[1][k] * n[1] + inv[2][k] * n[2]));
+      const cn = cornerNormals(o.mesh);
+      for (const [a, b, c, fi, ca, cb, cc] of triangulate(o.mesh)) {
+        pos.push(toWorld(o.mesh.vertices[a]), toWorld(o.mesh.vertices[b]), toWorld(o.mesh.vertices[c]));
+        nrm.push(nToWorld(cn[fi][ca]), nToWorld(cn[fi][cb]), nToWorld(cn[fi][cc]));
+        owner.push(oi);
+      }
+    });
+    const n = owner.length;
+    this.numTris = n;
+    if (!n) return;
+
+    const tv = new Float32Array(n * 9);
+    pos.forEach((p, i) => tv.set(p, i * 3));
+    const { nodes, order } = buildBVH(tv, n);
+
+    const triRows = Math.ceil(n / TRIS_PER_ROW);
+    const triData = new Float32Array(TRIS_PER_ROW * 6 * 4 * triRows);
+    for (let slot = 0; slot < n; slot++) {
+      const t = order[slot];
+      const base = ((slot % TRIS_PER_ROW) * 6 + Math.floor(slot / TRIS_PER_ROW) * TRIS_PER_ROW * 6) * 4;
+      for (let k = 0; k < 3; k++) {
+        triData.set([...pos[t * 3 + k], k === 0 ? owner[t] : 0], base + k * 4);
+        triData.set([...nrm[t * 3 + k], 0], base + 12 + k * 4);
+      }
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.triTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TRIS_PER_ROW * 6, triRows, 0, gl.RGBA, gl.FLOAT, triData);
+
+    const nodeRows = Math.ceil(nodes.length / NODES_PER_ROW);
+    const nodeData = new Float32Array(NODES_PER_ROW * 2 * 4 * nodeRows);
+    nodes.forEach((node, i) => {
+      const base = ((i % NODES_PER_ROW) * 2 + Math.floor(i / NODES_PER_ROW) * NODES_PER_ROW * 2) * 4;
+      nodeData.set([...node.min, node.a, ...node.max, node.count], base);
+    });
+    gl.bindTexture(gl.TEXTURE_2D, this.bvhTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, NODES_PER_ROW * 2, nodeRows, 0, gl.RGBA, gl.FLOAT, nodeData);
+  }
+
   // Renders one sample per pixel into the accumulation buffer, either path
   // traced or (preview = true) as the flat solid view.
   renderSample(basis, settings, preview = false) {
@@ -169,6 +231,13 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.objTex);
     gl.uniform1i(locs.uObjects, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.triTex);
+    gl.uniform1i(locs.uTris, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.bvhTex);
+    gl.uniform1i(locs.uBVH, 3);
+    gl.uniform1i(locs.uNumTris, this.numTris);
 
     const sky = settings.skyIntensity;
     gl.uniform1i(locs.uNumObjects, this.numObjects);

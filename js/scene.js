@@ -1,10 +1,12 @@
 // Scene model: entities (objects + lights), render settings, camera, presets.
 
 import { rotationMatrix, DEG } from './math.js';
+import { primitiveToMesh } from './mesh.js';
 
 // Order must match the M_* defines in the trace shader.
 export const MATERIAL_TYPES = ['diffuse', 'plastic', 'metal', 'glass'];
-export const SHAPES = ['sphere', 'box', 'cylinder'];
+// 'mesh' objects are polygon meshes (made in edit mode or added as a plane).
+export const SHAPES = ['sphere', 'box', 'cylinder', 'mesh'];
 
 export const MATERIAL_PRESETS = {
   'Matte white': { type: 'diffuse', color: '#d9d9d9', roughness: 1, ior: 1.5 },
@@ -35,7 +37,7 @@ const defaultMaterial = () => ({
   emissionColor: '#ffffff',
 });
 
-const SHAPE_NAMES = { sphere: 'Sphere', box: 'Box', cylinder: 'Cylinder' };
+const SHAPE_NAMES = { sphere: 'Sphere', box: 'Box', cylinder: 'Cylinder', mesh: 'Mesh' };
 
 export function makeObject(shape = 'sphere', props = {}) {
   const { material, ...rest } = props;
@@ -49,6 +51,7 @@ export function makeObject(shape = 'sphere', props = {}) {
     radius: 1,
     size: [2, 2, 2],
     height: 2,
+    scale: [1, 1, 1],
     ...rest,
     material: { ...defaultMaterial(), ...material },
   };
@@ -72,6 +75,7 @@ export const ADDABLE = [
   { kind: 'sphere', label: 'Sphere', key: 'S' },
   { kind: 'box', label: 'Box', key: 'B' },
   { kind: 'cylinder', label: 'Cylinder', key: 'C' },
+  { kind: 'plane', label: 'Plane', key: 'P' },
   { kind: 'light', label: 'Light', key: 'L' },
 ];
 
@@ -86,7 +90,19 @@ export function makeDefault(kind, at = [0, 0, 0]) {
   if (kind === 'cylinder') {
     return makeObject('cylinder', { position: [x, y + 0.75, z], radius: 0.5, height: 1.5, material: { ...MATERIAL_PRESETS['Copper'] } });
   }
+  if (kind === 'plane') {
+    return makeObject('mesh', { name: 'Plane', position: [x, y + 0.01, z], mesh: primitiveToMesh({ shape: 'plane' }), material: { ...MATERIAL_PRESETS['Matte white'] } });
+  }
   return makeLight({ position: [x, y + 2.5, z] });
+}
+
+// Turns a sphere / box / cylinder into an editable polygon mesh in place.
+export function convertToMesh(o) {
+  if (o.kind !== 'object' || o.shape === 'mesh') return false;
+  o.mesh = primitiveToMesh(o);
+  o.shape = 'mesh';
+  o.scale = [1, 1, 1];
+  return true;
 }
 
 export function cloneEntity(e) {
@@ -98,6 +114,7 @@ export function cloneEntity(e) {
 
 // Half-extents of the shape's unit primitive.
 export function localScale(o) {
+  if (o.shape === 'mesh') return o.scale;
   if (o.shape === 'sphere') return [o.radius, o.radius, o.radius];
   if (o.shape === 'box') return o.size.map((s) => s / 2);
   return [o.radius, o.height / 2, o.radius];
@@ -224,8 +241,8 @@ export function deserialize(text) {
   const settings = { ...base, ...data.settings, sun: { ...base.sun, ...(data.settings?.sun || {}) } };
   const entities = data.entities.map((e) => {
     if (e.kind === 'light') return makeLight({ ...e, id: undefined });
-    const o = makeObject(SHAPES.includes(e.shape) ? e.shape : 'sphere', { ...e, id: undefined });
-    return o;
+    const shape = SHAPES.includes(e.shape) && (e.shape !== 'mesh' || e.mesh) ? e.shape : 'sphere';
+    return makeObject(shape, { ...e, id: undefined });
   });
   // makeObject/makeLight spread `id: undefined` over the fresh id, so reassign.
   for (const e of entities) e.id = newId();

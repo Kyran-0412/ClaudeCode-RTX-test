@@ -4,9 +4,11 @@
 
 import { add, sub, dot, mulMatVec } from './math.js';
 import { objectFrame } from './scene.js';
+import { meshEdges, newell, faceCenter, edgeKey } from './mesh.js';
 
 const ACCENT = '#ffb547';
 const WIRE = '#c3c8d2';
+const EDGE = '#e4e8ef';
 const WIRE_LIGHT = '#d9cf8f';
 const GRID = '#343944';
 const GRID_X = '#a8484c'; // the line along X (z = 0)
@@ -81,11 +83,43 @@ function lightRings(e, scaleBy = 1) {
   ];
 }
 
+function meshLines(e, toWorld) {
+  const w = e.mesh.vertices.map(toWorld);
+  return meshEdges(e.mesh).map(([a, b]) => [w[a], w[b]]);
+}
+
+// Silhouette, open and sharp edges of a mesh: the lines that read as its shape.
+function meshOutline(e, toWorld, camPos) {
+  const w = e.mesh.vertices.map(toWorld);
+  const facing = e.mesh.faces.map((f) => dot(newell(w, f), sub(faceCenter(w, f), camPos)) < 0);
+  const normals = e.mesh.faces.map((f) => {
+    const n = newell(w, f);
+    const l = Math.hypot(...n) || 1;
+    return n.map((v) => v / l);
+  });
+  const edgeFaces = new Map();
+  e.mesh.faces.forEach((f, fi) => {
+    for (let i = 0; i < f.length; i++) {
+      const key = edgeKey(f[i], f[(i + 1) % f.length]);
+      if (!edgeFaces.has(key)) edgeFaces.set(key, []);
+      edgeFaces.get(key).push(fi);
+    }
+  });
+  const lines = [];
+  for (const [key, fs] of edgeFaces) {
+    const [a, b] = key.split('-').map(Number);
+    const keep = fs.length !== 2 || facing[fs[0]] !== facing[fs[1]] || dot(normals[fs[0]], normals[fs[1]]) < 0.77;
+    if (keep) lines.push([w[a], w[b]]);
+  }
+  return lines;
+}
+
 // Minimal outline used to highlight the selection.
-function outline(e) {
+function outline(e, camPos) {
   if (e.kind === 'light') return lightRings(e, 1.4);
   const { M } = objectFrame(e);
   const toWorld = (l) => add(e.position, mulMatVec(M, l));
+  if (e.shape === 'mesh') return meshOutline(e, toWorld, camPos);
   if (e.shape === 'sphere') {
     return [
       ring([0, 0, 0], [1, 0, 0], [0, 1, 0]),
@@ -113,6 +147,7 @@ function wire(e) {
   }
   const { M } = objectFrame(e);
   const toWorld = (l) => add(e.position, mulMatVec(M, l));
+  if (e.shape === 'mesh') return meshLines(e, toWorld);
   const lines = [];
   if (e.shape === 'sphere') {
     for (const lat of [-60, -30, 0, 30, 60]) {
@@ -155,7 +190,8 @@ function drawGrid(ctx, proj) {
 
 // ---------------------------------------------------------------- main entry
 // options.wireframe: { entities } draws the whole scene as lines.
-export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides = null, wireframe = null } = {}) {
+// options.edit: { entity, data } draws mesh edit mode (see EditMode.drawData).
+export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides = null, wireframe = null, edit = null } = {}) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
@@ -171,12 +207,17 @@ export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides
     drawGrid(ctx, proj);
     ctx.lineWidth = 1;
     for (const e of wireframe.entities) {
-      if (e === entity) continue;
+      if (e === entity || (edit && e === edit.entity)) continue;
       ctx.strokeStyle = e.kind === 'light' ? WIRE_LIGHT : WIRE;
       ctx.globalAlpha = 0.75;
       for (const line of wire(e)) strokePolyline(ctx, proj, line);
     }
     ctx.globalAlpha = 1;
+  }
+  if (edit) {
+    drawEdit(ctx, proj, edit.data);
+    if (guides) drawGuides(ctx, proj, guides);
+    return;
   }
   if (!entity) return;
 
@@ -185,7 +226,7 @@ export function drawOverlay(canvas, basis, entity, { showDropLine = true, guides
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = ACCENT;
   ctx.globalAlpha = 0.95;
-  for (const line of wireframe ? wire(entity) : outline(entity)) strokePolyline(ctx, proj, line);
+  for (const line of wireframe ? wire(entity) : outline(entity, basis.pos)) strokePolyline(ctx, proj, line);
 
   if (showDropLine) {
     const top = proj.toCam(entity.position);
@@ -231,4 +272,60 @@ function drawGuides(ctx, proj, guides) {
     ctx.setLineDash([]);
   }
   ctx.globalAlpha = 1;
+}
+
+// Mesh edit mode: shaded selected faces, edges, vertex dots or face dots.
+function drawEdit(ctx, proj, data) {
+  ctx.globalAlpha = 1;
+  for (const f of data.faces) {
+    if (!f.selected) continue;
+    const pts = f.points.map((p) => proj.toCam(p));
+    if (pts.some((p) => p[2] < NEAR)) continue;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const s = proj.toScreen(p);
+      if (i) ctx.lineTo(s[0], s[1]);
+      else ctx.moveTo(s[0], s[1]);
+    });
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255, 181, 71, 0.28)';
+    ctx.fill();
+  }
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = EDGE;
+  ctx.globalAlpha = 0.75;
+  ctx.beginPath();
+  for (const e of data.edges) if (!e.selected) segmentPath(ctx, proj, e.a, e.b);
+  ctx.stroke();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = ACCENT;
+  ctx.globalAlpha = 1;
+  ctx.beginPath();
+  for (const e of data.edges) if (e.selected) segmentPath(ctx, proj, e.a, e.b);
+  ctx.stroke();
+
+  const dot = (p, size, fill) => {
+    const c = proj.toCam(p);
+    if (c[2] < NEAR) return;
+    const s = proj.toScreen(c);
+    ctx.fillStyle = fill;
+    ctx.fillRect(s[0] - size / 2, s[1] - size / 2, size, size);
+  };
+  for (const v of data.verts) if (!v.selected) dot(v.p, 5, '#0d0e11');
+  for (const v of data.verts) if (!v.selected) dot(v.p, 3, EDGE);
+  for (const v of data.verts) if (v.selected) dot(v.p, 6, ACCENT);
+  if (data.mode === 'face') {
+    for (const f of data.faces) dot(f.center, f.selected ? 6 : 4, f.selected ? ACCENT : EDGE);
+  }
+}
+
+function segmentPath(ctx, proj, p, q) {
+  let a = proj.toCam(p), b = proj.toCam(q);
+  if (a[2] < NEAR && b[2] < NEAR) return;
+  if (a[2] < NEAR) a = lerpToNear(a, b);
+  else if (b[2] < NEAR) b = lerpToNear(b, a);
+  const sa = proj.toScreen(a), sb = proj.toScreen(b);
+  ctx.moveTo(sa[0], sa[1]);
+  ctx.lineTo(sb[0], sb[1]);
 }

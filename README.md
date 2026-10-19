@@ -46,6 +46,24 @@ Shortcuts work like Blender's: select first, then transform with the keyboard.
 Move and rotate use world axes; scale uses the object's own axes (so a rotated
 box stretches along its own length). Spheres and lights always scale evenly.
 
+**Edit mode.** Select an object and press <kbd>Tab</kbd> to edit its mesh. Spheres,
+boxes and cylinders are exact mathematical shapes until then; entering edit mode
+turns that object into a polygon mesh (a one-way change). Shift+A → Plane adds a mesh directly.
+
+| In edit mode | How |
+| --- | --- |
+| Vertex / edge / face select | <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> |
+| Select, add to selection | Click, <kbd>Shift</kbd>+click |
+| Select all / none | <kbd>A</kbd> / <kbd>Alt</kbd>+<kbd>A</kbd> |
+| Move / rotate / scale selection | <kbd>G</kbd> / <kbd>R</kbd> / <kbd>S</kbd>, with the same axis keys, numbers and snapping as objects |
+| Delete selection (and faces using it) | <kbd>X</kbd> or <kbd>Delete</kbd> |
+| Center view on selection | <kbd>.</kbd> |
+| Back to object mode | <kbd>Tab</kbd> |
+
+Points hidden behind the surface can't be picked in Solid or Rendered view; Wireframe
+view is x-ray, so everything can be picked there. Meshes shade smoothly, with edges
+sharper than 40° kept crisp; turn smooth shading off in the inspector for a faceted look.
+
 **Views.** *Wireframe* draws every object as lines over a ground grid (red line =
 X axis, blue = Z). *Solid* shows plain grey shapes with no materials, and it updates
 instantly, which suits laying out a scene. *Rendered* is the full path tracer.
@@ -66,6 +84,8 @@ settings. Scenes auto-save to your browser and can be exported/imported as JSON.
   - *Glass* — exact dielectric Fresnel, refraction by IOR, optional roughness (frosted),
     and Beer–Lambert absorption for tinted glass (thicker = darker).
   - Any object can *glow* (emission).
+- **Meshes** are ray traced through a bounding volume hierarchy (BVH) built on the CPU
+  and walked on the GPU, with smooth shading normals.
 - **Lights**: spherical area lights (soft shadows that depend on size and distance)
   and a sun with adjustable angular size, plus a gradient sky.
 - **Camera**: thin-lens depth of field, ACES filmic tone mapping, exposure.
@@ -78,7 +98,9 @@ settings. Scenes auto-save to your browser and can be exported/imported as JSON.
 | `js/renderer.js` | WebGL2 setup, scene upload, accumulation buffers |
 | `js/scene.js` | Scene model, material presets, preset scenes, save/load |
 | `js/main.js` | App state, mouse/touch/keyboard interaction, add menu, render loop |
-| `js/transform.js` | Keyboard move / rotate / scale tool |
+| `js/transform.js` | Keyboard move / rotate / scale tool (objects and mesh vertices) |
+| `js/editmode.js` | Mesh edit mode: selection, picking, delete |
+| `js/mesh.js` | Mesh building, normals, triangulation and the BVH used for ray tracing meshes |
 | `js/ui.js` | Side panel (scene list, inspector, settings) |
 | `js/picking.js` | CPU ray casting for clicking objects |
 | `js/overlay.js` | Selection outline drawn over the render |

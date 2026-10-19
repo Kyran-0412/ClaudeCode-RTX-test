@@ -1,8 +1,9 @@
 import { Renderer } from './renderer.js';
 import { UI } from './ui.js';
 import { PRESETS, ADDABLE, makeDefault, cloneEntity, serialize, deserialize } from './scene.js';
-import { TransformTool } from './transform.js';
-import { cameraBasis, screenRay } from './camera.js';
+import { TransformTool, EntityTarget, VertexTarget } from './transform.js';
+import { EditMode, SELECT_MODES, SELECT_MODE_NAMES } from './editmode.js';
+import { cameraBasis, screenRay, project } from './camera.js';
 import { pick } from './picking.js';
 import { drawOverlay } from './overlay.js';
 import { add, sub, scale, dot, clamp } from './math.js';
@@ -49,7 +50,8 @@ const app = {
   },
 
   select(id) {
-    if (this.tool?.active && this.tool.state.entity.id !== id) this.tool.confirm();
+    if (this.tool?.active && this.tool.state.target.entity.id !== id) this.tool.confirm();
+    if (this.edit?.active && this.edit.entity.id !== id) this.exitEdit();
     this.selectedId = id;
     this.overlayDirty = true;
     ui.renderList();
@@ -74,6 +76,11 @@ const app = {
   },
 
   deleteSelected() {
+    if (this.edit?.active) {
+      const n = this.edit.deleteSelected();
+      if (n) { this.markDirty(); ui.renderInspector(); updateHint(); }
+      return;
+    }
     const i = this.scene.entities.findIndex((e) => e.id === this.selectedId);
     if (i < 0) return;
     this.scene.entities.splice(i, 1);
@@ -87,6 +94,41 @@ const app = {
     const copy = cloneEntity(e);
     if (offset) copy.position = add(copy.position, [0.6, 0, 0.6]);
     this.addEntity(copy);
+  },
+
+  // ---------------------------------------------------------------- edit mode
+  enterEdit() {
+    const e = this.selected;
+    if (!e) return;
+    if (e.kind !== 'object') { showToast("Lights don't have a mesh to edit."); return; }
+    if (this.tool?.active) this.tool.confirm();
+    const result = this.edit.enter(e);
+    if (result === 'converted') showToast(`${e.name} is now an editable mesh.`);
+    this.markDirty();
+    ui.refresh();
+    updateHint();
+  },
+
+  exitEdit() {
+    if (!this.edit.active) return;
+    if (this.tool?.active) this.tool.confirm();
+    this.edit.exit();
+    this.overlayDirty = true;
+    ui.renderInspector();
+    updateHint();
+  },
+
+  setSelectMode(mode) {
+    this.edit.setMode(mode);
+    this.overlayDirty = true;
+    ui.renderInspector();
+    updateHint();
+  },
+
+  editSelectionChanged() {
+    this.overlayDirty = true;
+    ui.renderInspector();
+    updateHint();
   },
 
   focusOnSelected() {
@@ -105,6 +147,7 @@ const app = {
 
   setScene(scene) {
     if (this.tool?.active) this.tool.cancel();
+    if (this.edit?.active) this.edit.exit();
     this.scene = scene;
     this.selectedId = null;
     this.markDirty();
@@ -212,9 +255,32 @@ const tool = new TransformTool({
   },
 });
 app.tool = tool;
+const edit = new EditMode();
+app.edit = edit;
+
+// The thing G / R / S act on: selected vertices in edit mode, else the object.
+function transformTarget() {
+  if (edit.active) {
+    const vs = edit.selectedVerts();
+    if (!vs.size) { showToast('Select some vertices, edges or faces first.'); return null; }
+    return new VertexTarget(edit.entity, vs);
+  }
+  return app.selected ? new EntityTarget(app.selected) : null;
+}
+
+// ---------------------------------------------------------------- toast
+const toast = document.getElementById('toast');
+let toastTimer = 0;
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 2600);
+}
 
 // ---------------------------------------------------------------- hint bar
 const hint = document.getElementById('hint');
+const modeBadge = document.getElementById('stat-mode');
 const k = (key) => `<kbd>${key}</kbd>`;
 function updateHint() {
   if (tool.active) {
@@ -226,8 +292,16 @@ function updateHint() {
     return;
   }
   hint.classList.remove('transforming');
+  modeBadge.hidden = !edit.active;
+  if (edit.active) {
+    modeBadge.textContent = `Edit mode · ${SELECT_MODE_NAMES[edit.mode]}`;
+    hint.innerHTML =
+      `${k('1')} vertex ${k('2')} edge ${k('3')} face · click select (${k('Shift')} adds) · ${k('A')} all · ` +
+      `${k('G')} ${k('R')} ${k('S')} transform · ${k('Del')} delete · ${k('Tab')} done`;
+    return;
+  }
   hint.innerHTML = app.selected
-    ? `${k('G')} move · ${k('R')} rotate · ${k('S')} scale · ${k('.')} center view · ${k('Shift')}+${k('D')} duplicate · ${k('Del')} delete · ${k('Shift')}+${k('A')} add`
+    ? `${k('G')} move · ${k('R')} rotate · ${k('S')} scale · ${k('Tab')} edit mesh · ${k('.')} center view · ${k('Shift')}+${k('D')} duplicate · ${k('Del')} delete · ${k('Shift')}+${k('A')} add`
     : `Click: select · ${k('Shift')}+${k('A')} add · ${k('1')} ${k('2')} ${k('3')} view · Drag: orbit · Right-drag: pan · Wheel: zoom`;
 }
 
@@ -326,7 +400,7 @@ glCanvas.addEventListener('pointerdown', (ev) => {
 
   const [x, y] = localXY(ev);
   const pan = ev.button === 2 || ev.button === 1 || (ev.button === 0 && (ev.ctrlKey || ev.metaKey));
-  drag = { x, y, moved: false, mode: pan ? 'pan' : 'orbit', button: ev.button };
+  drag = { x, y, moved: false, mode: pan ? 'pan' : 'orbit', button: ev.button, shift: ev.shiftKey };
 });
 
 glCanvas.addEventListener('pointermove', (ev) => {
@@ -366,10 +440,24 @@ function endPointer(ev) {
   if (!pointers.has(ev.pointerId)) return;
   pointers.delete(ev.pointerId);
   if (drag && drag.mode === 'orbit' && drag.button === 0 && !drag.moved) {
-    // A plain click: select what is under the cursor, or clear the selection.
     const { ro, rd } = rayAt(drag.x, drag.y);
-    const hit = pick(app.scene.entities, ro, rd);
-    app.select(hit ? hit.entity.id : null);
+    if (edit.active) {
+      // Edit mode: pick a vertex / edge / face of the mesh being edited.
+      const basis = cameraBasis(app.scene.camera);
+      const w = glCanvas.clientWidth, h = glCanvas.clientHeight;
+      edit.pick({
+        ray: { ro, rd, screen: [drag.x, drag.y] },
+        project: (p) => project(basis, p, w, h),
+        basis,
+        xray: viewMode === 'wire',
+        add: drag.shift,
+      });
+      app.editSelectionChanged();
+    } else {
+      // A plain click: select what is under the cursor, or clear the selection.
+      const hit = pick(app.scene.entities, ro, rd);
+      app.select(hit ? hit.entity.id : null);
+    }
   }
   drag = null;
 }
@@ -408,9 +496,48 @@ window.addEventListener('keydown', (ev) => {
     // G / R / S switch to another transform, keeping what was done so far.
     if (plain && !ev.shiftKey && TRANSFORM_KEYS[key]) {
       ev.preventDefault();
-      tool.start(TRANSFORM_KEYS[key], tool.state.entity, mouse);
+      tool.confirm();
+      const target = transformTarget();
+      if (target) tool.start(TRANSFORM_KEYS[key], target, mouse);
     } else if (tool.handleKey(ev)) {
       ev.preventDefault();
+    }
+    return;
+  }
+
+  if (ev.key === 'Tab' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    if (edit.active) app.exitEdit();
+    else app.enterEdit();
+    return;
+  }
+
+  if (edit.active) {
+    if (plain && !ev.shiftKey && ['1', '2', '3'].includes(ev.key)) {
+      app.setSelectMode(SELECT_MODES[Number(ev.key) - 1]);
+    } else if (key === 'a' && ev.altKey && !ev.ctrlKey && !ev.metaKey) {
+      ev.preventDefault();
+      edit.clear();
+      app.editSelectionChanged();
+    } else if (plain && !ev.shiftKey && key === 'a') {
+      edit.selectAll();
+      app.editSelectionChanged();
+    } else if (plain && !ev.shiftKey && TRANSFORM_KEYS[key]) {
+      ev.preventDefault();
+      const target = transformTarget();
+      if (target) tool.start(TRANSFORM_KEYS[key], target, mouse);
+    } else if (ev.key === 'Delete' || ev.key === 'Backspace' || (plain && !ev.shiftKey && key === 'x')) {
+      ev.preventDefault();
+      app.deleteSelected();
+    } else if (ev.key === 'Escape') {
+      edit.clear();
+      app.editSelectionChanged();
+    } else if (plain && (ev.key === '.' || ev.code === 'NumpadDecimal')) {
+      ev.preventDefault();
+      centerViewOn(edit.median());
+    } else if (ev.shiftKey && plain && (key === 'a' || key === 'd')) {
+      ev.preventDefault();
+      showToast('Leave edit mode (Tab) to add or duplicate objects.');
     }
     return;
   }
@@ -422,11 +549,12 @@ window.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     if (app.selected) {
       app.duplicateSelected({ offset: false });
-      tool.start('grab', app.selected, mouse);
+      tool.start('grab', new EntityTarget(app.selected), mouse);
     }
   } else if (plain && !ev.shiftKey && TRANSFORM_KEYS[key]) {
     ev.preventDefault();
-    if (app.selected) tool.start(TRANSFORM_KEYS[key], app.selected, mouse);
+    const target = transformTarget();
+    if (target) tool.start(TRANSFORM_KEYS[key], target, mouse);
   } else if (ev.key === 'Delete' || ev.key === 'Backspace') {
     ev.preventDefault();
     app.deleteSelected();
@@ -441,19 +569,18 @@ window.addEventListener('keydown', (ev) => {
     setViewMode(VIEW_MODES[Number(ev.key) - 1]);
   } else if (plain && (ev.key === '.' || ev.code === 'NumpadDecimal')) {
     ev.preventDefault();
-    centerViewOnSelected();
+    centerViewOn(app.selected?.position);
   }
 });
 
 // Moves the camera's orbit pivot to the selected object, gliding over ~0.3 s.
 // The camera keeps its angle and distance, so the view slides across.
 let pivotAnim = 0;
-function centerViewOnSelected() {
-  const e = app.selected;
-  if (!e) return;
+function centerViewOn(point) {
+  if (!point) return;
   const cam = app.scene.camera;
   const from = cam.target.slice();
-  const to = e.position.slice();
+  const to = point.slice();
   const t0 = performance.now();
   cancelAnimationFrame(pivotAnim);
   const step = (now) => {
@@ -556,6 +683,7 @@ function frame(now) {
     drawOverlay(overlay, basis, app.selected, {
       guides: tool.guides(),
       wireframe: viewMode === 'wire' ? { entities: app.scene.entities } : null,
+      edit: edit.active ? { entity: edit.entity, data: edit.drawData(basis, viewMode === 'wire') } : null,
     });
     app.overlayDirty = false;
   }

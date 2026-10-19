@@ -4,24 +4,19 @@
 // an axis (Shift + axis key excludes that axis instead), typing a number sets
 // an exact amount, Ctrl snaps, and click/Enter confirms while right-click/Esc
 // cancels.
+//
+// The tool works on a "target": a whole object (EntityTarget) or the selected
+// vertices of a mesh in edit mode (VertexTarget).
 
-import { add, sub, scale, dot, normalize, rotationMatrix, DEG } from './math.js';
+import { add, sub, scale, dot, normalize, rotationMatrix, mulMatVec, DEG } from './math.js';
 import { project } from './camera.js';
+import { objectFrame } from './scene.js';
+import { touchMesh } from './mesh.js';
 
 export const AXIS_DIRS = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 export const AXIS_COLORS = ['#ff5b5b', '#7bd88f', '#5fa4ff'];
 const AXIS_NAMES = ['X', 'Y', 'Z'];
 const MODE_NAMES = { grab: 'Move', rotate: 'Rotate', scale: 'Scale' };
-
-function snapshot(e) {
-  return JSON.parse(JSON.stringify({
-    position: e.position, rotation: e.rotation, size: e.size, radius: e.radius, height: e.height,
-  }));
-}
-
-function restore(e, s) {
-  for (const [k, v] of Object.entries(s)) if (v !== undefined) e[k] = JSON.parse(JSON.stringify(v));
-}
 
 // Rotation of angle `a` (radians) around unit axis `k` (Rodrigues).
 function axisAngle(k, a) {
@@ -56,7 +51,102 @@ function toEuler(R) {
 
 const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const snapTo = (v, step) => Math.round(v / step) * step;
+const copy = (v) => JSON.parse(JSON.stringify(v));
 
+// ---------------------------------------------------------------- targets
+// A whole object or light.
+export class EntityTarget {
+  constructor(entity) {
+    this.entity = entity;
+    this.label = '';
+    this.orig = copy({
+      position: entity.position, rotation: entity.rotation, size: entity.size,
+      radius: entity.radius, height: entity.height, scale: entity.scale,
+    });
+  }
+
+  pivot() { return this.orig.position; }
+
+  restore() {
+    for (const [k, v] of Object.entries(this.orig)) if (v !== undefined) this.entity[k] = copy(v);
+  }
+
+  // World directions used for scale constraints (the object's own axes).
+  scaleAxes() {
+    if (this.entity.kind !== 'object') return AXIS_DIRS;
+    const R = rotationMatrix(this.entity.rotation);
+    return [0, 1, 2].map((i) => [R[0][i], R[1][i], R[2][i]]);
+  }
+
+  apply(op) {
+    const e = this.entity, o = this.orig;
+    this.restore();
+    if (op.mode === 'grab') {
+      e.position = add(o.position, op.delta);
+    } else if (op.mode === 'rotate') {
+      if (e.kind === 'object') e.rotation = toEuler(mul(axisAngle(op.axis, op.angle), rotationMatrix(o.rotation)));
+    } else {
+      const { f, hits } = op;
+      const clampMin = (v) => Math.max(0.01, v);
+      if (e.kind === 'light' || e.shape === 'sphere') {
+        e.radius = clampMin(o.radius * f);
+      } else if (e.shape === 'box') {
+        e.size = o.size.map((v, i) => clampMin(hits[i] ? +(v * f).toFixed(4) : v));
+      } else if (e.shape === 'mesh') {
+        e.scale = o.scale.map((v, i) => Math.max(0.001, hits[i] ? +(v * f).toFixed(4) : v));
+      } else {
+        if (hits[0] || hits[2]) e.radius = clampMin(o.radius * f);
+        if (hits[1]) e.height = clampMin(o.height * f);
+      }
+    }
+  }
+}
+
+// Selected vertices of a mesh object. Works in world space so axes match
+// what you see, then maps results back into the mesh's local space.
+export class VertexTarget {
+  constructor(entity, indices) {
+    this.entity = entity;
+    this.indices = [...indices];
+    this.label = `${this.indices.length} vert${this.indices.length === 1 ? '' : 's'}`;
+    this.orig = copy(entity.mesh.vertices);
+    const { M, inv } = objectFrame(entity);
+    this.toWorld = (v) => add(entity.position, mulMatVec(M, v));
+    this.toLocal = (w) => mulMatVec(inv, sub(w, entity.position));
+    this.world0 = this.indices.map((i) => this.toWorld(this.orig[i]));
+    const c = [0, 0, 0];
+    for (const w of this.world0) for (let k = 0; k < 3; k++) c[k] += w[k] / this.world0.length;
+    this.center = c;
+  }
+
+  pivot() { return this.center; }
+
+  restore() {
+    this.entity.mesh.vertices = copy(this.orig);
+    touchMesh(this.entity.mesh);
+  }
+
+  scaleAxes() { return AXIS_DIRS; }
+
+  apply(op) {
+    const verts = copy(this.orig);
+    const c = this.center;
+    let fn;
+    if (op.mode === 'grab') {
+      fn = (w) => add(w, op.delta);
+    } else if (op.mode === 'rotate') {
+      const R = axisAngle(op.axis, op.angle);
+      fn = (w) => add(c, mulMatVec(R, sub(w, c)));
+    } else {
+      fn = (w) => w.map((v, k) => (op.hits[k] ? c[k] + (v - c[k]) * op.f : v));
+    }
+    this.indices.forEach((vi, j) => { verts[vi] = this.toLocal(fn(this.world0[j])); });
+    this.entity.mesh.vertices = verts;
+    touchMesh(this.entity.mesh);
+  }
+}
+
+// ---------------------------------------------------------------- tool
 export class TransformTool {
   // ctx: { basis(), size() -> [w, h], rayAt(x, y) -> {ro, rd}, onChange(), onEnd() }
   constructor(ctx) {
@@ -68,20 +158,19 @@ export class TransformTool {
     return !!this.state;
   }
 
-  start(mode, entity, mouse) {
+  start(mode, target, mouse) {
     if (this.state) this.confirm();
     const [w, h] = this.ctx.size();
     const basis = this.ctx.basis();
-    const c2d = project(basis, entity.position, w, h) || [w / 2, h / 2];
+    const pivot = target.pivot().slice();
     this.state = {
       mode,
-      entity,
-      orig: snapshot(entity),
-      origPos: entity.position.slice(),
+      target,
+      pivot,
+      c2d: project(basis, pivot, w, h) || [w / 2, h / 2],
       mouse0: mouse.slice(),
       mouse: mouse.slice(),
       prevMouse: mouse.slice(),
-      c2d,
       axis: -1,
       exclude: false,
       typed: '',
@@ -153,7 +242,7 @@ export class TransformTool {
   cancel() {
     const s = this.state;
     if (!s) return;
-    restore(s.entity, s.orig);
+    s.target.restore();
     this.state = null;
     this.ctx.onChange();
     this.ctx.onEnd(false);
@@ -169,7 +258,7 @@ export class TransformTool {
   grabPoint(mouse) {
     const s = this.state;
     const { ro, rd } = this.ctx.rayAt(mouse[0], mouse[1]);
-    const p0 = s.origPos;
+    const p0 = s.pivot;
     if (s.axis >= 0 && !s.exclude) {
       // Closest point on the axis line to the mouse ray.
       const a = AXIS_DIRS[s.axis];
@@ -189,10 +278,9 @@ export class TransformTool {
 
   apply() {
     const s = this.state;
-    const e = s.entity;
-    restore(e, s.orig);
     const typed = this.typedValue();
     const axisLabel = s.axis < 0 ? '' : (s.exclude ? `${AXIS_NAMES[s.axis]}-plane locked` : `${AXIS_NAMES[s.axis]} axis`);
+    let op;
 
     if (s.mode === 'grab') {
       let delta;
@@ -206,7 +294,7 @@ export class TransformTool {
         if (s.snap) delta = delta.map((v) => snapTo(v, 0.25));
       }
       s.lastDelta = delta;
-      e.position = add(s.origPos, delta);
+      op = { mode: 'grab', delta };
       s.display = `Δ ${delta.map((v) => v.toFixed(2)).join('  ')}`;
     } else if (s.mode === 'rotate') {
       const basis = this.ctx.basis();
@@ -220,10 +308,7 @@ export class TransformTool {
       }
       let deg = typed !== null ? typed : (s.angle * sign) / DEG;
       if (typed === null && s.snap) deg = snapTo(deg, 5);
-      if (e.kind === 'object') {
-        const R = mul(axisAngle(normalize(axis), deg * DEG), rotationMatrix(s.orig.rotation));
-        e.rotation = toEuler(R);
-      }
+      op = { mode: 'rotate', axis: normalize(axis), angle: deg * DEG };
       s.display = `${deg.toFixed(1)}°`;
     } else {
       const d0 = Math.max(Math.hypot(s.mouse0[0] - s.c2d[0], s.mouse0[1] - s.c2d[1]), 10);
@@ -231,21 +316,15 @@ export class TransformTool {
       let f = typed !== null ? Math.abs(typed) : d1 / d0;
       if (typed === null && s.snap) f = Math.max(0.1, snapTo(f, 0.1));
       const hits = [0, 1, 2].map((i) => (s.axis < 0 ? true : s.exclude ? i !== s.axis : i === s.axis));
-      const clampMin = (v) => Math.max(0.01, v);
-      if (e.kind === 'light' || e.shape === 'sphere') {
-        e.radius = clampMin(s.orig.radius * f);
-      } else if (e.shape === 'box') {
-        e.size = s.orig.size.map((v, i) => clampMin(hits[i] ? +(v * f).toFixed(4) : v));
-      } else {
-        if (hits[0] || hits[2]) e.radius = clampMin(s.orig.radius * f);
-        if (hits[1]) e.height = clampMin(s.orig.height * f);
-      }
+      op = { mode: 'scale', f, hits };
       s.display = `× ${f.toFixed(3)}`;
     }
+    s.target.apply(op);
 
+    const localScale = s.mode === 'scale' && s.axis >= 0 && s.target instanceof EntityTarget;
     s.status = [
-      MODE_NAMES[s.mode],
-      axisLabel && (s.mode === 'scale' && s.axis >= 0 ? `local ${axisLabel}` : axisLabel),
+      MODE_NAMES[s.mode] + (s.target.label ? ` ${s.target.label}` : ''),
+      axisLabel && (localScale ? `local ${axisLabel}` : axisLabel),
       s.typed ? `${s.typed}▏` : s.display,
     ].filter(Boolean).join(' · ');
     this.ctx.onChange();
@@ -257,17 +336,12 @@ export class TransformTool {
     if (!s) return null;
     let axes = [];
     if (s.axis >= 0) {
-      const R = s.mode === 'scale' && s.entity.kind === 'object' ? rotationMatrix(s.entity.rotation) : null;
-      const dir = (i) => (R ? [R[0][i], R[1][i], R[2][i]] : AXIS_DIRS[i]);
+      const dirs = s.mode === 'scale' ? s.target.scaleAxes() : AXIS_DIRS;
       axes = s.exclude
-        ? [0, 1, 2].filter((i) => i !== s.axis).map((i) => ({ dir: dir(i), color: AXIS_COLORS[i] }))
-        : [{ dir: dir(s.axis), color: AXIS_COLORS[s.axis] }];
+        ? [0, 1, 2].filter((i) => i !== s.axis).map((i) => ({ dir: dirs[i], color: AXIS_COLORS[i] }))
+        : [{ dir: dirs[s.axis], color: AXIS_COLORS[s.axis] }];
     }
-    return {
-      origin: s.mode === 'grab' ? s.origPos : s.entity.position,
-      axes,
-      line: s.mode === 'grab' ? null : [s.c2d, s.mouse],
-    };
+    return { origin: s.pivot, axes, line: s.mode === 'grab' ? null : [s.c2d, s.mouse] };
   }
 }
 
