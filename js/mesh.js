@@ -6,7 +6,7 @@
 // in the object's local space. Faces are polygons wound counter-clockwise
 // when seen from outside.
 
-import { sub, dot, normalize, length } from './math.js';
+import { sub, dot, cross, normalize, length } from './math.js';
 
 const SMOOTH_ANGLE = 40; // degrees: sharper edges stay crisp when smooth shading
 
@@ -417,4 +417,268 @@ export function insetFaces(mesh, faceSet) {
     out.faces[fi] = inner;
   }
   return { mesh: out, corners };
+}
+
+// ---------------------------------------------------------------- loop cut
+function edgeFaceMap(mesh) {
+  const map = new Map();
+  mesh.faces.forEach((f, fi) => {
+    for (let i = 0; i < f.length; i++) {
+      const k = edgeKey(f[i], f[(i + 1) % f.length]);
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(fi);
+    }
+  });
+  return map;
+}
+
+// In quad f, the edge across from p-q, oriented so its first vertex is the
+// one joined to p.
+function oppositeEdge(f, p, q) {
+  const other = (v, not) => {
+    const i = f.indexOf(v);
+    const a = f[(i + 1) % 4], b = f[(i + 3) % 4];
+    return a === not ? b : a;
+  };
+  return [other(p, q), other(q, p)];
+}
+
+// The ring of edges a loop cut through edge a-b would cross: walks from quad
+// to quad through opposite edges until it hits a non-quad, an open edge, or
+// comes back round. Edges keep a consistent direction so a fraction t means
+// the same side all the way round.
+export function edgeRing(mesh, a, b) {
+  const ef = edgeFaceMap(mesh);
+  const startKey = edgeKey(a, b);
+  const start = ef.get(startKey);
+  if (!start) return null;
+  const edges = new Map([[startKey, [a, b]]]);
+  const faces = [];
+  const used = new Set();
+  let closed = false;
+  const walk = (firstFace) => {
+    let p = a, q = b, k = startKey, fi = firstFace;
+    while (fi !== undefined && !used.has(fi) && mesh.faces[fi].length === 4) {
+      used.add(fi);
+      const [p2, q2] = oppositeEdge(mesh.faces[fi], p, q);
+      const k2 = edgeKey(p2, q2);
+      faces.push({ fi, k1: k, k2 });
+      if (k2 === startKey) { closed = true; return; }
+      if (edges.has(k2)) return;
+      edges.set(k2, [p2, q2]);
+      fi = ef.get(k2).find((x) => x !== fi);
+      p = p2; q = q2; k = k2;
+    }
+  };
+  walk(start[0]);
+  if (!closed && start[1] !== undefined) walk(start[1]);
+  return faces.length ? { edges, faces } : null;
+}
+
+// Cuts every ring edge at fractions `ts` and splits the crossed quads.
+// Faces that only touch a ring edge get the new vertices added to that edge
+// so the mesh stays watertight. Returns the mesh and, per ring edge key,
+// { p, q, list } with the new vertex indices from p to q.
+export function loopCut(mesh, ring, ts) {
+  const out = cloneMesh(mesh);
+  const cuts = new Map();
+  for (const [k, [p, q]] of ring.edges) {
+    const P = mesh.vertices[p], Q = mesh.vertices[q];
+    const list = ts.map((t) => {
+      out.vertices.push(P.map((c, i) => c + (Q[i] - c) * t));
+      return out.vertices.length - 1;
+    });
+    cuts.set(k, { p, q, list });
+  }
+  const crossed = new Set();
+  for (const { fi, k1, k2 } of ring.faces) {
+    crossed.add(fi);
+    const E1 = cuts.get(k1), E2 = cuts.get(k2);
+    const r1 = [E1.p, ...E1.list, E1.q], r2 = [E2.p, ...E2.list, E2.q];
+    const n0 = newell(mesh.vertices, mesh.faces[fi]);
+    const pieces = [];
+    for (let j = 0; j + 1 < r1.length; j++) {
+      const quad = [r1[j], r1[j + 1], r2[j + 1], r2[j]];
+      if (dot(newell(out.vertices, quad), n0) < 0) quad.reverse();
+      pieces.push(quad);
+    }
+    out.faces[fi] = pieces[0];
+    out.faces.push(...pieces.slice(1));
+  }
+  mesh.faces.forEach((f, fi) => {
+    if (crossed.has(fi)) return;
+    const nf = [];
+    let changed = false;
+    for (let i = 0; i < f.length; i++) {
+      const a = f[i], b = f[(i + 1) % f.length];
+      nf.push(a);
+      const c = cuts.get(edgeKey(a, b));
+      if (c) { changed = true; nf.push(...(c.p === a ? c.list : [...c.list].reverse())); }
+    }
+    if (changed) out.faces[fi] = nf;
+  });
+  return { mesh: out, cuts };
+}
+
+// ---------------------------------------------------------------- bevel
+// Bevels edges (given as edge keys) to `width`, with `segments` steps across
+// the bevel (1 = flat chamfer). Positions are worked out in world space via
+// toWorld / toLocal so the width is in world units. Where bevelled edges
+// meet, the gap at the corner is filled with a cap. Returns the new mesh and
+// the indices of the bevel faces, or null if no edge can be bevelled.
+export function bevelEdges(mesh, keys, width, segments, toWorld, toLocal) {
+  const world = mesh.vertices.map(toWorld);
+  const ef = edgeFaceMap(mesh);
+  const sel = new Set([...keys].filter((k) => (ef.get(k) || []).length === 2));
+  if (!sel.size) return null;
+  const bv = new Set();
+  for (const k of sel) for (const v of k.split('-')) bv.add(Number(v));
+
+  // Keep the bevel narrower than the edges it slides along.
+  let minLen = Infinity;
+  for (const f of mesh.faces) {
+    for (let i = 0; i < f.length; i++) {
+      const a = f[i], b = f[(i + 1) % f.length];
+      if (bv.has(a) || bv.has(b)) minLen = Math.min(minLen, length(sub(world[a], world[b])));
+    }
+  }
+  const d = Math.max(0, Math.min(width, minLen * 0.45));
+
+  const outW = world.map((w) => w.slice());
+  const addVert = (p) => { outW.push(p); return outW.length - 1; };
+  const slides = new Map();
+  const slide = (v, w) => {
+    const key = `${v}>${w}`;
+    if (!slides.has(key)) {
+      const dir = normalize(sub(world[w], world[v]));
+      slides.set(key, addVert(world[v].map((c, i) => c + dir[i] * d)));
+    }
+    return slides.get(key);
+  };
+
+  // Each face corner at a bevelled vertex becomes a short list of new
+  // vertices: an inset point when both of its edges are bevelled, otherwise
+  // points slid along its unbevelled edge(s).
+  const corner = new Map();
+  const faces = mesh.faces.map((f, fi) => {
+    const n = normalize(newell(world, f));
+    const nf = [];
+    f.forEach((v, i) => {
+      if (!bv.has(v)) { nf.push(v); return; }
+      const prev = f[(i + f.length - 1) % f.length], next = f[(i + 1) % f.length];
+      const inSel = sel.has(edgeKey(prev, v)), outSel = sel.has(edgeKey(v, next));
+      let L;
+      if (inSel && outSel) {
+        const e1 = normalize(sub(world[v], world[prev])), e2 = normalize(sub(world[next], world[v]));
+        const i1 = normalize(cross(n, e1)), i2 = normalize(cross(n, e2));
+        const s = [i1[0] + i2[0], i1[1] + i2[1], i1[2] + i2[2]];
+        const dir = length(s) > 1e-6 ? normalize(s) : i1;
+        const k = 1 / Math.max(dot(dir, i1), 0.2);
+        const maxOff = length(sub(faceCenter(world, f), world[v])) * 0.98;
+        const off = Math.min(d * k, maxOff);
+        L = [addVert(world[v].map((c, j) => c + dir[j] * off))];
+      } else if (inSel) L = [slide(v, next)];
+      else if (outSel) L = [slide(v, prev)];
+      else L = [slide(v, prev), slide(v, next)];
+      corner.set(`${fi}:${v}`, L);
+      nf.push(...L);
+    });
+    return nf;
+  });
+
+  // Points across the bevel at vertex v between two corner points, bowed
+  // toward the original corner (quadratic curve) for a rounded profile.
+  // Strips that meet at the same two points share one curve.
+  const curves = new Map();
+  const curve = (v, from, to) => {
+    const key = `${v}:${Math.min(from, to)}-${Math.max(from, to)}`;
+    if (!curves.has(key)) {
+      const pts = [];
+      for (let j = 1; j < segments; j++) {
+        const t = j / segments, u = 1 - t;
+        pts.push(addVert([0, 1, 2].map((c) => u * u * outW[from][c] + 2 * u * t * world[v][c] + t * t * outW[to][c])));
+      }
+      curves.set(key, { from, pts });
+    }
+    const c = curves.get(key);
+    return c.from === from ? c.pts : [...c.pts].reverse();
+  };
+  // Which curve each bevelled edge uses at each end, and which face it starts from.
+  const arcs = new Map();
+  const arc = (v, from, to, k, side) => {
+    arcs.set(`${k}@${v}`, { from, to, side });
+    return curve(v, from, to);
+  };
+
+  const runs = (fi, p, q) => {
+    const f = mesh.faces[fi];
+    return f[(f.indexOf(p) + 1) % f.length] === q;
+  };
+  const newFaces = [];
+  for (const k of sel) {
+    const [x, y] = k.split('-').map(Number);
+    const [f1, f2] = ef.get(k);
+    let F, G, a, b;
+    if (runs(f1, x, y)) { F = f1; G = f2; a = x; b = y; }
+    else { F = f1; G = f2; a = y; b = x; }
+    if (!runs(F, a, b) || !runs(G, b, a)) continue; // inconsistent winding
+    const LFa = corner.get(`${F}:${a}`), LFb = corner.get(`${F}:${b}`);
+    const LGa = corner.get(`${G}:${a}`), LGb = corner.get(`${G}:${b}`);
+    const Fa = LFa[LFa.length - 1], Fb = LFb[0], Ga = LGa[0], Gb = LGb[LGb.length - 1];
+    const Ra = [Fa, ...arc(a, Fa, Ga, k, F), Ga];
+    const Rb = [Fb, ...arc(b, Fb, Gb, k, F), Gb];
+    for (let j = 0; j + 1 < Ra.length; j++) newFaces.push([Rb[j], Ra[j], Ra[j + 1], Rb[j + 1]]);
+  }
+
+  // Corner caps: walk the faces around each bevelled vertex and close the gap.
+  const vertFaces = new Map();
+  mesh.faces.forEach((f, fi) => f.forEach((v) => { if (bv.has(v)) (vertFaces.get(v) || vertFaces.set(v, []).get(v)).push(fi); }));
+  for (const v of bv) {
+    const around = vertFaces.get(v);
+    const after = (fi) => { const f = mesh.faces[fi]; return f[(f.indexOf(v) + 1) % f.length]; };
+    const before = (fi) => { const f = mesh.faces[fi]; return f[(f.indexOf(v) + f.length - 1) % f.length]; };
+    const order = [around[0]];
+    let closedFan = false;
+    for (let guard = 0; guard < around.length; guard++) {
+      const cur = order[order.length - 1];
+      const g = around.find((x) => x !== cur && before(x) === after(cur));
+      if (g === undefined) break;
+      if (g === order[0]) { closedFan = true; break; }
+      if (order.includes(g)) break;
+      order.push(g);
+    }
+    if (!closedFan) continue;
+    const cycle = [];
+    for (const fi of order) {
+      cycle.push(...corner.get(`${fi}:${v}`));
+      const k = edgeKey(v, after(fi));
+      const A = sel.has(k) && arcs.get(`${k}@${v}`);
+      if (A) cycle.push(...(A.side === fi ? curve(v, A.from, A.to) : curve(v, A.to, A.from)));
+    }
+    const ring = cycle.filter((x, i) => x !== cycle[(i + cycle.length - 1) % cycle.length]);
+    if (new Set(ring).size < 3) continue;
+    // A gap that just runs out and back along the same points has no area.
+    const steps = new Set(ring.map((x, i) => `${x}>${ring[(i + 1) % ring.length]}`));
+    if ([...steps].every((st) => steps.has(st.split('>').reverse().join('>')))) continue;
+    const vn = [0, 0, 0];
+    for (const fi of order) {
+      const fn = newell(world, mesh.faces[fi]);
+      for (let c = 0; c < 3; c++) vn[c] += fn[c];
+    }
+    const cap = dot(newell(outW, ring), vn) < 0 ? [...ring].reverse() : ring;
+    if (segments > 1 && cap.length > 3) {
+      // Rounded corner: fan from a centre point bowed toward the old corner.
+      const c = [0, 0, 0];
+      for (const i of cap) for (let j = 0; j < 3; j++) c[j] += outW[i][j] / cap.length;
+      const centre = addVert(c.map((x, j) => x + (world[v][j] - x) * 0.3));
+      for (let i = 0; i < cap.length; i++) newFaces.push([cap[i], cap[(i + 1) % cap.length], centre]);
+    } else {
+      newFaces.push(cap);
+    }
+  }
+
+  const merged = { ...mesh, vertices: outW.map(toLocal), faces: [...faces, ...newFaces] };
+  const { mesh: compact } = compactVertices(merged);
+  const first = faces.length;
+  return { mesh: compact, newFaces: new Set(newFaces.map((_, i) => first + i)) };
 }

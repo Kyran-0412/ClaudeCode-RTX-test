@@ -274,6 +274,8 @@ export class UI {
         { class: 'button-row' },
         h('button', { text: 'Extrude', title: 'E', disabled: !n, onclick: () => app.startExtrude() }),
         h('button', { text: 'Inset', title: 'I', disabled: !n, onclick: () => app.startInset() }),
+        h('button', { text: 'Bevel', title: 'Ctrl+B', disabled: !n, onclick: () => app.startBevel() }),
+        h('button', { text: 'Loop cut', title: 'Ctrl+R, then point at an edge', onclick: () => app.startLoopCut() }),
         h('button', { text: 'Select all', title: 'A', onclick: () => { edit.selectAll(); app.editSelectionChanged(); } }),
         h('button', { class: 'danger', text: 'Delete', title: 'Delete / X', disabled: !n, onclick: () => app.deleteSelected() }),
         h('button', { text: 'Done', title: 'Tab', onclick: () => app.exitEdit() }),

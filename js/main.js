@@ -1,7 +1,7 @@
 import { Renderer } from './renderer.js';
 import { UI } from './ui.js';
 import { PRESETS, ADDABLE, makeDefault, cloneEntity, serialize, deserialize, reserveIds } from './scene.js';
-import { TransformTool, EntityTarget, VertexTarget, InsetTarget } from './transform.js';
+import { TransformTool, EntityTarget, VertexTarget, InsetTarget, BevelTarget } from './transform.js';
 import { History } from './history.js';
 import { EditMode, SELECT_MODES, SELECT_MODE_NAMES } from './editmode.js';
 import { cameraBasis, screenRay, project } from './camera.js';
@@ -75,23 +75,27 @@ const app = {
   // ---------------------------------------------------------------- undo
   // Changes are recorded shortly after they settle (so a slider drag is one
   // step), or right away when a transform finishes.
+  // True while a modal tool (transform or loop cut) is running.
+  busy() {
+    return !!(this.tool?.active || this.loopCutActive);
+  },
   scheduleCommit() {
     clearTimeout(this.commitTimer);
-    if (!this.history || this.tool?.active) return;
+    if (!this.history || this.busy()) return;
     this.commitTimer = setTimeout(() => this.commitNow(), 400);
   },
   commitNow() {
     clearTimeout(this.commitTimer);
-    if (this.history && !this.tool?.active) this.history.commit();
+    if (this.history && !this.busy()) this.history.commit();
   },
   undo() {
-    if (this.tool?.active) return;
+    if (this.busy()) return;
     this.commitNow();
     if (this.history.undo()) showToast('Undo');
     else showToast('Nothing to undo');
   },
   redo() {
-    if (this.tool?.active) return;
+    if (this.busy()) return;
     this.commitNow();
     if (this.history.redo()) showToast('Redo');
     else showToast('Nothing to redo');
@@ -140,6 +144,7 @@ const app = {
   exitEdit() {
     if (!this.edit.active) return;
     if (this.tool?.active) this.tool.confirm();
+    if (this.loopCutActive) cancelLoopCut();
     this.edit.exit();
     this.overlayDirty = true;
     ui.renderInspector();
@@ -359,6 +364,128 @@ function startInset() {
 }
 app.startInset = startInset;
 
+// ---------------------------------------------------------------- bevel
+function startBevel() {
+  app.commitNow();
+  const keys = edit.bevelEdgeKeys();
+  if (!keys.size) { showToast('Select the edges to bevel (or faces / vertices around them).'); return; }
+  const saved = edit.saveSelection();
+  edit.clear();
+  const target = new BevelTarget(edit.entity, keys);
+  startTool('bevel', target, mouse, {
+    onCancel: () => { edit.restoreSelection(saved); app.markDirty(); },
+    onConfirm: () => {
+      if (!target.result) return;
+      const verts = new Set();
+      for (const fi of target.result.newFaces) for (const v of edit.mesh.faces[fi]) verts.add(v);
+      edit.selectVerts(verts, target.result.newFaces);
+    },
+  });
+}
+app.startBevel = startBevel;
+
+function changeBevelSegments(delta) {
+  const t = tool.state.target;
+  t.segments = clamp(t.segments + delta, 1, 12);
+  tool.refresh();
+}
+
+// ---------------------------------------------------------------- loop cut
+// Two steps, like Blender: hover an edge to preview the loop (wheel or +/-
+// sets the number of cuts) and click; a single cut then slides along its
+// edges until a second click.
+let loopCut = null;
+const fractions = (n) => Array.from({ length: n }, (_, i) => (i + 1) / (n + 1));
+
+function viewHelpers() {
+  const basis = cameraBasis(app.scene.camera);
+  const w = glCanvas.clientWidth, h = glCanvas.clientHeight;
+  return { basis, project: (p) => project(basis, p, w, h) };
+}
+
+function startLoopCut() {
+  if (!edit.active) return;
+  app.commitNow();
+  loopCut = { phase: 'pick', cuts: 1, key: null, ring: null, preview: null };
+  app.loopCutActive = true;
+  updateLoopHover();
+  updateHint();
+}
+app.startLoopCut = startLoopCut;
+
+function updateLoopHover() {
+  const { basis, project: proj } = viewHelpers();
+  const { ro, rd } = rayAt(mouse[0], mouse[1]);
+  const ray = { ro, rd, screen: mouse };
+  const key =
+    edit.edgeUnder({ ray, project: proj, basis, xray: viewMode === 'wire', radius: 12 }) ||
+    edit.nearestEdgeOfFaceUnder({ ray, project: proj });
+  loopCut.key = key;
+  loopCut.ring = edit.ringFor(key);
+  loopCut.preview = loopCut.ring ? edit.ringPreview(loopCut.ring, fractions(loopCut.cuts)) : null;
+  app.overlayDirty = true;
+  updateHint();
+}
+
+function setLoopCuts(n) {
+  loopCut.cuts = clamp(n, 1, 32);
+  updateLoopHover();
+}
+
+function placeLoopCut() {
+  const { ring, key, cuts: count } = loopCut;
+  if (!ring) { showToast('Point at an edge between four-sided faces.'); return; }
+  const cuts = edit.applyLoopCut(ring, fractions(count));
+  app.markDirty();
+  if (count === 1) {
+    const { project: proj } = viewHelpers();
+    const { toWorld } = edit.frame();
+    const [p, q] = ring.edges.get(key);
+    loopCut = {
+      phase: 'slide',
+      cuts,
+      mouse0: mouse.slice(),
+      a2d: proj(toWorld(edit.mesh.vertices[p])),
+      b2d: proj(toWorld(edit.mesh.vertices[q])),
+      t: 0.5,
+    };
+    ui.renderInspector();
+    updateHint();
+  } else {
+    finishLoopCut();
+  }
+}
+
+function updateLoopSlide() {
+  const lc = loopCut;
+  if (!lc.a2d || !lc.b2d) return;
+  const dx = lc.b2d[0] - lc.a2d[0], dy = lc.b2d[1] - lc.a2d[1];
+  const l2 = dx * dx + dy * dy;
+  if (l2 < 1) return;
+  const moved = (mouse[0] - lc.mouse0[0]) * dx + (mouse[1] - lc.mouse0[1]) * dy;
+  lc.t = clamp(0.5 + moved / l2, 0.02, 0.98);
+  edit.slideLoop(lc.cuts, lc.t);
+  app.markDirty();
+  updateHint();
+}
+
+function finishLoopCut(centre = false) {
+  if (loopCut?.phase === 'slide' && centre) { edit.slideLoop(loopCut.cuts, 0.5); app.markDirty(); }
+  loopCut = null;
+  app.loopCutActive = false;
+  app.overlayDirty = true;
+  ui.renderInspector();
+  updateHint();
+  app.commitNow();
+}
+
+function cancelLoopCut() {
+  loopCut = null;
+  app.loopCutActive = false;
+  app.overlayDirty = true;
+  updateHint();
+}
+
 // The thing G / R / S act on: selected vertices in edit mode, else the object.
 function transformTarget() {
   if (edit.active) {
@@ -384,8 +511,23 @@ const hint = document.getElementById('hint');
 const modeBadge = document.getElementById('stat-mode');
 const k = (key) => `<kbd>${key}</kbd>`;
 function updateHint() {
+  if (loopCut) {
+    hint.classList.add('transforming');
+    hint.innerHTML = loopCut.phase === 'pick'
+      ? `Loop cut · ${loopCut.cuts} cut${loopCut.cuts === 1 ? '' : 's'}${loopCut.ring ? '' : ' · point at an edge'}<br>` +
+        `<span class="keys">wheel or ${k('+')} ${k('−')} number of cuts · click to cut · right-click/${k('Esc')} cancel</span>`
+      : `Slide loop · ${(loopCut.t * 100).toFixed(0)}%<br>` +
+        `<span class="keys">move the mouse to slide · click/${k('Enter')} confirm · right-click/${k('Esc')} centre it</span>`;
+    return;
+  }
   if (tool.active) {
     hint.classList.add('transforming');
+    if (tool.state.mode === 'bevel') {
+      hint.innerHTML =
+        `${tool.state.status}<br><span class="keys">move the mouse for width · wheel or ${k('↑')} ${k('↓')} segments · ` +
+        `type a width · ${k('Ctrl')} snap · click/${k('Enter')} confirm · right-click/${k('Esc')} cancel</span>`;
+      return;
+    }
     hint.innerHTML =
       `${tool.state.status}<br><span class="keys">${k('X')} ${k('Y')} ${k('Z')} axis · ` +
       `${k('Shift')}+axis: lock axis · type a number · ${k('Ctrl')} snap · ` +
@@ -398,7 +540,8 @@ function updateHint() {
     modeBadge.textContent = `Edit mode · ${SELECT_MODE_NAMES[edit.mode]}`;
     hint.innerHTML =
       `${k('1')} vertex ${k('2')} edge ${k('3')} face · click select (${k('Shift')} adds) · ${k('A')} all · ` +
-      `${k('G')} ${k('R')} ${k('S')} transform · ${k('E')} extrude · ${k('I')} inset · ${k('X')} delete · ${k('Tab')} done`;
+      `${k('G')} ${k('R')} ${k('S')} transform · ${k('E')} extrude · ${k('I')} inset · ` +
+      `${k('Ctrl')}+${k('R')} loop cut · ${k('Ctrl')}+${k('B')} bevel · ${k('X')} delete · ${k('Tab')} done`;
     return;
   }
   hint.innerHTML = app.selected
@@ -474,12 +617,25 @@ window.addEventListener('pointerdown', (ev) => {
 window.addEventListener('pointermove', (ev) => {
   mouse = localXY(ev);
   if (tool.active) tool.setMouse(mouse, ev.ctrlKey || ev.metaKey);
+  else if (loopCut?.phase === 'pick') updateLoopHover();
+  else if (loopCut?.phase === 'slide') updateLoopSlide();
 });
 
 glCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // Any click while transforming finishes it: left confirms, right cancels.
 window.addEventListener('pointerdown', (ev) => {
+  if (loopCut) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (loopCut.phase === 'pick') {
+      if (ev.button === 2) cancelLoopCut();
+      else placeLoopCut();
+    } else {
+      finishLoopCut(ev.button === 2);
+    }
+    return;
+  }
   if (!tool.active) return;
   ev.preventDefault();
   ev.stopPropagation();
@@ -565,10 +721,22 @@ function endPointer(ev) {
 glCanvas.addEventListener('pointerup', endPointer);
 glCanvas.addEventListener('pointercancel', endPointer);
 
+let wheelAcc = 0;
 glCanvas.addEventListener(
   'wheel',
   (ev) => {
     ev.preventDefault();
+    // During a bevel or loop cut the wheel sets segments / cuts instead of zooming.
+    const counting = (tool.active && tool.state.mode === 'bevel') || loopCut?.phase === 'pick';
+    if (counting) {
+      wheelAcc += ev.deltaY;
+      if (Math.abs(wheelAcc) < 40) return;
+      const step = wheelAcc < 0 ? 1 : -1;
+      wheelAcc = 0;
+      if (loopCut) setLoopCuts(loopCut.cuts + step);
+      else changeBevelSegments(step);
+      return;
+    }
     const cam = app.scene.camera;
     cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.001), 0.5, 200);
     app.markDirty();
@@ -602,6 +770,28 @@ window.addEventListener('keydown', (ev) => {
   const key = ev.key.toLowerCase();
   const plain = !ev.ctrlKey && !ev.metaKey && !ev.altKey;
 
+  if (loopCut) {
+    ev.preventDefault();
+    if (ev.key === 'Escape') {
+      if (loopCut.phase === 'pick') cancelLoopCut();
+      else finishLoopCut(true);
+    } else if (ev.key === 'Enter') {
+      if (loopCut.phase === 'pick') placeLoopCut();
+      else finishLoopCut();
+    } else if (loopCut.phase === 'pick') {
+      if (/^[1-9]$/.test(ev.key)) setLoopCuts(Number(ev.key));
+      else if (['+', '=', 'ArrowUp', 'PageUp'].includes(ev.key)) setLoopCuts(loopCut.cuts + 1);
+      else if (['-', 'ArrowDown', 'PageDown'].includes(ev.key)) setLoopCuts(loopCut.cuts - 1);
+    }
+    return;
+  }
+
+  if (tool.active && tool.state.mode === 'bevel' && ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown'].includes(ev.key)) {
+    ev.preventDefault();
+    changeBevelSegments(ev.key === 'ArrowUp' || ev.key === 'PageUp' ? 1 : -1);
+    return;
+  }
+
   if (tool.active) {
     // G / R / S switch to another transform, keeping what was done so far.
     if (plain && !ev.shiftKey && TRANSFORM_KEYS[key]) {
@@ -619,6 +809,15 @@ window.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     if (edit.active) app.exitEdit();
     else app.enterEdit();
+    return;
+  }
+
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && (key === 'r' || key === 'b')) {
+    // Also stops the browser reloading (Ctrl+R) or opening bookmarks (Ctrl+B).
+    ev.preventDefault();
+    if (!edit.active) showToast(`${key === 'r' ? 'Loop cut' : 'Bevel'} works in edit mode. Select an object and press Tab.`);
+    else if (key === 'r') startLoopCut();
+    else startBevel();
     return;
   }
 
@@ -799,7 +998,9 @@ function frame(now) {
     drawOverlay(overlay, basis, app.selected, {
       guides: tool.guides(),
       wireframe: viewMode === 'wire' ? { entities: app.scene.entities } : null,
-      edit: edit.active ? { entity: edit.entity, data: edit.drawData(basis, viewMode === 'wire') } : null,
+      edit: edit.active
+        ? { entity: edit.entity, data: { ...edit.drawData(basis, viewMode === 'wire'), preview: loopCut?.preview || null } }
+        : null,
     });
     app.overlayDirty = false;
   }

@@ -4,7 +4,7 @@
 import { objectFrame, convertToMesh } from './scene.js';
 import {
   meshEdges, edgeKey, faceCenter, localAccel, raycastBVH, deleteFaces, touchMesh,
-  newell, extrudeFaces, extrudeEdges, insetFaces,
+  newell, extrudeFaces, extrudeEdges, insetFaces, edgeRing, loopCut,
 } from './mesh.js';
 import { add, sub, mulMatVec, normalize, length } from './math.js';
 
@@ -162,6 +162,66 @@ export class EditMode {
     return { corners, saved };
   }
 
+  // Edges a bevel should act on: selected edges, edges between selected
+  // vertices, or every edge of the selected faces.
+  bevelEdgeKeys() {
+    const keys = new Set();
+    if (this.mode === 'edge') this.edges.forEach((k) => keys.add(k));
+    else if (this.mode === 'vert') {
+      for (const [a, b] of meshEdges(this.mesh)) if (this.verts.has(a) && this.verts.has(b)) keys.add(edgeKey(a, b));
+    } else {
+      for (const fi of this.faces) {
+        const f = this.mesh.faces[fi];
+        for (let i = 0; i < f.length; i++) keys.add(edgeKey(f[i], f[(i + 1) % f.length]));
+      }
+    }
+    return keys;
+  }
+
+  // ---------------------------------------------------------------- loop cut
+  // Ring of quads a loop cut through `key` would cross (or null).
+  ringFor(key) {
+    if (!key) return null;
+    const [a, b] = key.split('-').map(Number);
+    return edgeRing(this.mesh, a, b);
+  }
+
+  // World-space line segments showing where the cuts would go.
+  ringPreview(ring, ts) {
+    const { toWorld } = this.frame();
+    const at = (k, t) => {
+      const [p, q] = ring.edges.get(k);
+      const P = this.mesh.vertices[p], Q = this.mesh.vertices[q];
+      return toWorld(P.map((c, i) => c + (Q[i] - c) * t));
+    };
+    const lines = [];
+    for (const { k1, k2 } of ring.faces) for (const t of ts) lines.push([at(k1, t), at(k2, t)]);
+    return lines;
+  }
+
+  // Applies the cut and selects the new loop(s). Returns the cut vertices.
+  applyLoopCut(ring, ts) {
+    const { mesh, cuts } = loopCut(this.mesh, ring, ts);
+    this.setMesh(mesh);
+    const verts = new Set();
+    for (const c of cuts.values()) c.list.forEach((v) => verts.add(v));
+    const mode = this.mode;
+    if (mode === 'face') this.mode = 'edge';
+    this.selectVerts(verts);
+    return cuts;
+  }
+
+  // Slides a single loop cut: each new vertex sits at fraction t along its edge.
+  slideLoop(cuts, t) {
+    const verts = this.mesh.vertices.slice();
+    for (const c of cuts.values()) {
+      const P = verts[c.p], Q = verts[c.q];
+      verts[c.list[0]] = P.map((x, i) => x + (Q[i] - x) * t);
+    }
+    this.mesh.vertices = verts;
+    touchMesh(this.mesh);
+  }
+
   restoreState(saved) {
     this.setMesh(saved.mesh);
     this.restoreSelection(saved.sel);
@@ -248,16 +308,7 @@ export class EditMode {
         if (d2 < best && visible(v)) { best = d2; hit = i; }
       });
     } else if (this.mode === 'edge') {
-      let best = 10;
-      for (const [a, b] of meshEdges(mesh)) {
-        const sa = project(toWorld(mesh.vertices[a])), sb = project(toWorld(mesh.vertices[b]));
-        if (!sa || !sb) continue;
-        const d = segDist(mx, my, sa, sb);
-        if (d < best) {
-          const mid = mesh.vertices[a].map((c, k) => (c + mesh.vertices[b][k]) / 2);
-          if (visible(mid)) { best = d; hit = edgeKey(a, b); }
-        }
-      }
+      hit = this.edgeUnder({ ray, project, basis, xray });
     } else {
       const acc = localAccel(mesh);
       const h = raycastBVH(acc.bvh, acc.tv, toLocal(ray.ro), dirToLocal(ray.rd));
@@ -276,6 +327,46 @@ export class EditMode {
       set.clear();
       set.add(hit);
     }
+  }
+
+  // Nearest visible edge to the cursor (within `radius` pixels), as a key.
+  edgeUnder({ ray, project, basis, xray, radius = 10 }) {
+    const mesh = this.mesh;
+    const { toWorld } = this.frame();
+    const visible = xray ? () => true : this.visibilityTester(basis);
+    const [mx, my] = ray.screen;
+    let best = radius, hit = null;
+    for (const [a, b] of meshEdges(mesh)) {
+      const sa = project(toWorld(mesh.vertices[a])), sb = project(toWorld(mesh.vertices[b]));
+      if (!sa || !sb) continue;
+      const d = segDist(mx, my, sa, sb);
+      if (d < best) {
+        const mid = mesh.vertices[a].map((c, k) => (c + mesh.vertices[b][k]) / 2);
+        if (visible(mid)) { best = d; hit = edgeKey(a, b); }
+      }
+    }
+    return hit;
+  }
+
+  // The edge of the face under the cursor that is closest to the cursor
+  // (used when the cursor isn't right on an edge).
+  nearestEdgeOfFaceUnder({ ray, project }) {
+    const mesh = this.mesh;
+    const { toWorld, toLocal, dirToLocal } = this.frame();
+    const acc = localAccel(mesh);
+    const h = raycastBVH(acc.bvh, acc.tv, toLocal(ray.ro), dirToLocal(ray.rd));
+    if (!h) return null;
+    const f = mesh.faces[acc.tris[h.tri][3]];
+    const [mx, my] = ray.screen;
+    let best = Infinity, hit = null;
+    for (let i = 0; i < f.length; i++) {
+      const a = f[i], b = f[(i + 1) % f.length];
+      const sa = project(toWorld(mesh.vertices[a])), sb = project(toWorld(mesh.vertices[b]));
+      if (!sa || !sb) continue;
+      const d = segDist(mx, my, sa, sb);
+      if (d < best) { best = d; hit = edgeKey(a, b); }
+    }
+    return hit;
   }
 
   // ---------------------------------------------------------------- drawing

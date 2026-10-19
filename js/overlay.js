@@ -318,6 +318,15 @@ function drawEdit(ctx, proj, data) {
   if (data.mode === 'face') {
     for (const f of data.faces) dot(f.center, f.selected ? 6 : 4, f.selected ? ACCENT : EDGE);
   }
+
+  // Loop cut preview.
+  if (data.preview) {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#ffe066';
+    ctx.beginPath();
+    for (const [a, b] of data.preview) segmentPath(ctx, proj, a, b);
+    ctx.stroke();
+  }
 }
 
 function segmentPath(ctx, proj, p, q) {

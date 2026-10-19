@@ -11,13 +11,13 @@
 import { add, sub, scale, dot, cross, length, normalize, rotationMatrix, mulMatVec, DEG } from './math.js';
 import { project } from './camera.js';
 import { objectFrame } from './scene.js';
-import { touchMesh, newell, faceCenter } from './mesh.js';
+import { touchMesh, newell, faceCenter, bevelEdges } from './mesh.js';
 
 export const AXIS_DIRS = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 export const AXIS_COLORS = ['#ff5b5b', '#7bd88f', '#5fa4ff'];
 const AXIS_NAMES = ['X', 'Y', 'Z', 'Normal'];
 const CUSTOM_AXIS = 3; // index used for a non-world axis, e.g. a face normal
-const MODE_NAMES = { grab: 'Move', rotate: 'Rotate', scale: 'Scale', inset: 'Inset' };
+const MODE_NAMES = { grab: 'Move', rotate: 'Rotate', scale: 'Scale', inset: 'Inset', bevel: 'Bevel' };
 
 // Rotation of angle `a` (radians) around unit axis `k` (Rodrigues).
 function axisAngle(k, a) {
@@ -191,6 +191,45 @@ export class InsetTarget {
   }
 }
 
+// Bevels edges of a mesh. The mesh is rebuilt from the original on every
+// change, since the segment count changes its structure.
+export class BevelTarget {
+  constructor(entity, edgeKeys) {
+    this.entity = entity;
+    this.orig = entity.mesh;
+    this.keys = edgeKeys;
+    this.segments = 1;
+    this.result = null;
+    const { M, inv } = objectFrame(entity);
+    this.toWorld = (v) => add(entity.position, mulMatVec(M, v));
+    this.toLocal = (w) => mulMatVec(inv, sub(w, entity.position));
+    this.label = `${edgeKeys.size} edge${edgeKeys.size === 1 ? '' : 's'}`;
+    const c = [0, 0, 0];
+    let n = 0;
+    for (const k of edgeKeys) {
+      for (const v of k.split('-')) {
+        const w = this.toWorld(this.orig.vertices[Number(v)]);
+        for (let j = 0; j < 3; j++) c[j] += w[j];
+        n++;
+      }
+    }
+    this.center = c.map((x) => x / Math.max(n, 1));
+  }
+
+  pivot() { return this.center; }
+  scaleAxes() { return AXIS_DIRS; }
+  restore() { this.entity.mesh = this.orig; }
+
+  apply(op) {
+    const r = bevelEdges(this.orig, this.keys, op.amount || 0, this.segments, this.toWorld, this.toLocal);
+    if (!r) return;
+    r.mesh.version = this.orig.version || 0;
+    touchMesh(r.mesh);
+    this.entity.mesh = r.mesh;
+    this.result = r;
+  }
+}
+
 // ---------------------------------------------------------------- tool
 export class TransformTool {
   // ctx: { basis(), size() -> [w, h], rayAt(x, y) -> {ro, rd}, onChange(), onEnd() }
@@ -223,6 +262,7 @@ export class TransformTool {
       customAxis: opts.axisDir ? normalize(opts.axisDir) : null,
       title: opts.title || null,
       onCancel: opts.onCancel || null,
+      onConfirm: opts.onConfirm || null,
       exclude: false,
       typed: '',
       snap: false,
@@ -261,7 +301,7 @@ export class TransformTool {
     const lower = k.toLowerCase();
     if (k === 'Escape') { this.cancel(); return true; }
     if (k === 'Enter') { this.confirm(); return true; }
-    if ((lower === 'x' || lower === 'y' || lower === 'z') && s.mode !== 'inset') {
+    if ((lower === 'x' || lower === 'y' || lower === 'z') && s.mode !== 'inset' && s.mode !== 'bevel') {
       const axis = 'xyz'.indexOf(lower);
       const exclude = ev.shiftKey;
       if (s.axis === axis && s.exclude === exclude) s.axis = -1; // same key again clears
@@ -284,9 +324,16 @@ export class TransformTool {
     return false;
   }
 
+  // Re-applies with the same input (after a setting such as segments changes).
+  refresh() {
+    if (this.state) this.apply();
+  }
+
   confirm() {
     if (!this.state) return;
+    const done = this.state.onConfirm;
     this.state = null;
+    if (done) done();
     this.ctx.onEnd(true);
   }
 
@@ -364,7 +411,7 @@ export class TransformTool {
       if (typed === null && s.snap) deg = snapTo(deg, 5);
       op = { mode: 'rotate', axis: normalize(axis), angle: deg * DEG };
       s.display = `${deg.toFixed(1)}°`;
-    } else if (s.mode === 'inset') {
+    } else if (s.mode === 'inset' || s.mode === 'bevel') {
       // Drag distance from where the inset started, converted to world units
       // at the selection's depth.
       const basis = this.ctx.basis();
@@ -373,8 +420,10 @@ export class TransformTool {
       const perPixel = (depth * 2 * basis.tanHalf) / h;
       let amount = typed !== null ? Math.abs(typed) : Math.hypot(s.mouse[0] - s.mouse0[0], s.mouse[1] - s.mouse0[1]) * perPixel * 0.5;
       if (typed === null && s.snap) amount = snapTo(amount, 0.05);
-      op = { mode: 'inset', amount };
-      s.display = `thickness ${amount.toFixed(3)}`;
+      op = { mode: s.mode, amount };
+      s.display = s.mode === 'bevel'
+        ? `width ${amount.toFixed(3)} · ${s.target.segments} segment${s.target.segments === 1 ? '' : 's'}`
+        : `thickness ${amount.toFixed(3)}`;
     } else {
       const d0 = Math.max(Math.hypot(s.mouse0[0] - s.c2d[0], s.mouse0[1] - s.c2d[1]), 10);
       const d1 = Math.hypot(s.mouse[0] - s.c2d[0], s.mouse[1] - s.c2d[1]);
@@ -408,7 +457,7 @@ export class TransformTool {
         ? [0, 1, 2].filter((i) => i !== s.axis).map((i) => ({ dir: dirs[i], color: AXIS_COLORS[i] }))
         : [{ dir: dirs[s.axis], color: AXIS_COLORS[s.axis] }];
     }
-    const line = s.mode === 'grab' ? null : s.mode === 'inset' ? [s.mouse0, s.mouse] : [s.c2d, s.mouse];
+    const line = s.mode === 'grab' ? null : s.mode === 'inset' || s.mode === 'bevel' ? [s.mouse0, s.mouse] : [s.c2d, s.mouse];
     return { origin: s.pivot, axes, line };
   }
 }
